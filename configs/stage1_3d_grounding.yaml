@@ -1,0 +1,84 @@
+# Stage 1 Configuration: 3D Grounding
+# Freeze LLM, train 3D-aware ViT
+
+model:
+  # 3D-aware ViT config
+  three_d_aware_vit:
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    patch_size: 16
+    image_size: 224
+    num_frames: 4
+    
+  # Dual Coordinate PE config (frozen)
+  dual_coordinate_pe:
+    embed_dim: 768
+    max_seq_length: 1000
+    
+  # Spatial Belief Memory config (frozen)
+  spatial_belief_memory:
+    memory_dim: 768
+    max_memory_size: 1000
+    attention_heads: 8
+    
+  # Projector config (frozen)
+  projector:
+    visual_token_dim: 768
+    llm_embed_dim: 4096
+    projection_type: "mlp"
+    hidden_dim: 4096
+    num_layers: 2
+    dropout: 0.1
+    
+  # LLM config (frozen)
+  llm_decoder:
+    model_name: "meta-llama/Llama-2-7b-hf"
+    freeze: true
+
+data:
+  dataset:
+    name: "SpatialExplorationDataset"
+    data_path: "data/spatial_exploration"
+    max_trajectory_length: 50
+    image_size: [224, 224]
+    
+  dataloader:
+    batch_size: 8
+    num_workers: 4
+    pin_memory: true
+    shuffle: true
+
+training:
+  stage: 1
+  learning_rate: 1e-4
+  weight_decay: 0.01
+  num_epochs: 10
+  warmup_steps: 1000
+  max_grad_norm: 1.0
+  scheduler: "cosine"
+  
+  # Loss weights
+  depth_loss_weight: 1.0
+  contrastive_loss_weight: 0.5
+  temperature: 0.07
+  
+  # Logging
+  log_interval: 10
+  save_interval: 1000
+  eval_interval: 500
+  
+  # Wandb
+  use_wandb: true
+  wandb_project: "spatial_vlm"
+  wandb_run_name: "stage1_3d_grounding"
+
+# Accelerate/DeepSpeed config
+accelerate:
+  gradient_accumulation_steps: 1
+  mixed_precision: "fp16"
+  ddp_find_unused_parameters: false
+
+# Output
+output_dir: "outputs/stage1"
+checkpoint_dir: "checkpoints/stage1"

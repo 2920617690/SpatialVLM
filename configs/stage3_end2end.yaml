@@ -1,0 +1,106 @@
+# Stage 3 Configuration: End-to-End Fine-tuning
+# Full model training with LoRA on LLM
+
+model:
+  # 3D-aware ViT config (trainable)
+  three_d_aware_vit:
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
+    patch_size: 16
+    image_size: 224
+    num_frames: 4
+    checkpoint: "checkpoints/stage2/best_model.pt"
+    
+  # Dual Coordinate PE config (trainable)
+  dual_coordinate_pe:
+    embed_dim: 768
+    max_seq_length: 1000
+    coordinate_dim: 12
+    
+  # Spatial Belief Memory config (trainable)
+  spatial_belief_memory:
+    memory_dim: 768
+    max_memory_size: 1000
+    attention_heads: 8
+    num_layers: 4
+    dropout: 0.1
+    
+  # Projector config (trainable)
+  projector:
+    visual_token_dim: 768
+    llm_embed_dim: 4096
+    projection_type: "mlp"
+    hidden_dim: 4096
+    num_layers: 2
+    dropout: 0.1
+    
+  # LLM config with LoRA
+  llm_decoder:
+    model_name: "meta-llama/Llama-2-7b-hf"
+    freeze: false
+    
+  # LoRA config
+  lora:
+    r: 8
+    lora_alpha: 32
+    target_modules: ["q_proj", "v_proj"]
+    lora_dropout: 0.05
+    bias: "none"
+    task_type: "CAUSAL_LM"
+
+data:
+  dataset:
+    name: "SpatialExplorationDataset"
+    data_path: "data/spatial_exploration"
+    max_trajectory_length: 50
+    image_size: [224, 224]
+    
+  dataloader:
+    batch_size: 2
+    num_workers: 4
+    pin_memory: true
+    shuffle: true
+
+training:
+  stage: 3
+  learning_rate: 1e-5
+  weight_decay: 0.01
+  num_epochs: 20
+  warmup_steps: 2000
+  max_grad_norm: 1.0
+  scheduler: "cosine"
+  
+  # Loss weights
+  task_loss_weight: 1.0
+  exploration_reward_weight: 0.1
+  
+  # Logging
+  log_interval: 10
+  save_interval: 1000
+  eval_interval: 500
+  
+  # Wandb
+  use_wandb: true
+  wandb_project: "spatial_vlm"
+  wandb_run_name: "stage3_end2end"
+
+# Accelerate/DeepSpeed config
+accelerate:
+  gradient_accumulation_steps: 4
+  mixed_precision: "fp16"
+  ddp_find_unused_parameters: false
+  
+  # DeepSpeed config (optional)
+  deepspeed:
+    offload_optimizer:
+      device: "cpu"
+      pin_memory: true
+    offload_param:
+      device: "cpu"
+      pin_memory: true
+    zero_stage: 2
+
+# Output
+output_dir: "outputs/stage3"
+checkpoint_dir: "checkpoints/stage3"
