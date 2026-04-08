@@ -1,50 +1,15 @@
-# Python
+/data/
+*.pyc
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
 *.egg-info/
 dist/
 build/
-*.egg
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Data (large files, download locally - only root level)
-/data/
-*.zip
-*.tar.gz
-*.hdf5
-*.h5
-
-# Model checkpoints
-checkpoints/
+.eggs/
 *.pt
 *.pth
 *.bin
 *.safetensors
-
-# Logs
-logs/
 wandb/
-*.log
-
-# PDF (论文等参考资料)
-*.pdf
-
-# Jupyter
-.ipynb_checkpoints/
+outputs/
+checkpoints/
+.DS_Store

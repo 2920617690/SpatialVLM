@@ -1,439 +1,151 @@
-# SpatialVLM: Spatial-Aware Vision-Language Model with 3D Belief Memory
+# Spatial VLM：增强视觉语言模型的空间推理能力
 
-> **Towards Deep Spatial Intelligence in Vision-Language Models**
->
-> 当前主流 VLM（ViT + Projector + LLM Decoder）在空间感知上存在根本性架构瓶颈。
-> 本项目旨在通过 **3D-aware 视觉编码**、**双坐标系位置编码** 和 **空间信念记忆机制**，
-> 赋予 VLM 真正的空间理解能力。
+## 研究动机
 
-## Motivation
+当前主流 VLM（如 LLaVA、Qwen-VL、InternVL）在空间推理任务上表现不佳。
 
-### 问题：当前 VLM 为什么做不好空间感知？
+### 问题分析
 
-根据 [Theory of Space (ICLR 2026)](https://arxiv.org/abs/2602.07055) 的系统性评估，当前 SOTA VLM 在空间任务上暴露出三大核心缺陷：
+空间信息在 VLM pipeline 的三个环节被系统性丢失：
 
-| 缺陷 | 表现 | 根因 |
-|------|------|------|
-| **Perception Bottleneck** | Vision 世界准确率仅 32-52%，远低于 Text 世界的 80% | ViT 的 2D patch 编码丢失了 3D 空间信息 |
-| **Belief Drift** | 正确感知的空间信息在后续步骤中被错误覆盖 | 缺乏稳定的空间记忆机制，信息在 token 序列中被冲刷 |
-| **Belief Inertia** | 环境变化后无法更新已有的空间信念（朝向惯性高达 68.9%） | 缺乏动态信念修正机制 |
+1. **ViT 编码阶段**：ViT 编码时完全不知道下游要问什么问题，对所有 patch 一视同仁地编码，空间信息在 flatten 过程中被稀释
+2. **Projector 阶段**：逐 patch 独立投影（MLP），patch 间的空间关系未被显式编码
+3. **LLM 解码阶段**：1D RoPE 只编码序列位置，无法区分"水平相邻"和"垂直相邻"的 patch；cross attention 在 attend 视觉特征时不考虑空间位置
 
-### 核心观点
+### 现有方法的局限
 
-> 问题不仅仅是"看不准"（Perception），更严重的是"记不住"（Drift）和"改不了"（Inertia）。
-> 根因在于——**缺乏显式的、可更新的空间世界模型**。
+- **Spatial-SSRL (2025)**：设计 5 个空间预训练任务，平均仅提升 4.63%
+- **Spa3R (2025)**：多视角学习空间表征，VSI-Bench 上 58.6%
+- **V-JEPA 2 (2025)**：100 万小时视频自监督预训练 + 4.7 倍数据扩增，在 Video QA 上也仅涨几个点（PerceptionTest +1.3, TempCompass +4.2）
 
----
+这些方法都在试图通过 **更多/更好的训练信号** 来让现有架构学到空间理解，但效果有限，说明 **"更多训练信号"路线的边际收益在递减**。问题不在训练信号，而在架构本身。
 
-## Architecture
+### 核心洞察
 
-### 整体架构
+人类看图像是 **"带着意图去看"** 的 —— 是 attention-driven 的主动感知。当问题是"桌子左边是什么？"时，人会主动将注意力聚焦到图像左侧区域。而现有 VLM 的 ViT 在编码时完全不知道要关注什么，是被动的、无差别的编码。
 
-```
-Input Image
-    │
-    ▼
-┌──────────────────────────┐
-│  3D-aware ViT            │  ← Module 1: NeRF-like 隐式 3D 表征
-│  ├── 2D Patch Embedding  │
-│  ├── Depth Branch        │     并行深度估计分支
-│  └── 3D Feature Fusion   │     融合 RGB + Depth → 3D-aware tokens
-└────────────┬─────────────┘
-             │ 3D-aware visual tokens
-             ▼
-┌──────────────────────────┐
-│  Dual Coordinate         │  ← Module 2: 双坐标系位置编码
-│  Position Encoding       │
-│  ├── Ego-centric PE      │     自我中心坐标（导航/路径推理）
-│  ├── Allocentric PE      │     世界中心坐标（全局地图构建）
-│  └── Learnable Switch    │     可学习的坐标系切换门控
-└────────────┬─────────────┘
-             │
-             ▼
-┌──────────────────────────┐     ┌─────────────────────────────┐
-│  LLM Decoder             │◄───►│  Spatial Belief Memory      │ ← Module 3
-│  (Frozen / Fine-tuned)   │     │  ├── Scene Graph Store      │
-│                          │     │  │   Nodes: obj → (pos, ori, │
-│  每 k 层插入:             │     │  │     conf, appearance, ts) │
-│  ├── Cross-Attn to       │     │  │   Edges: (i,j) → relation │
-│  │   Spatial Memory      │     │  ├── Confidence-Gated Write │
-│  └── Uncertainty Signal  │     │  └── Uncertainty-Aware Read │
-└────────────┬─────────────┘     └─────────────────────────────┘
-             │
-             ▼
-    Output (text / action / cognitive map)
-```
+参考 **ViLT** 将文本和图像一起输入做联合编码的思路，结合对 VLM pipeline 各环节的针对性改进，本项目从 **架构层面** 提出三个互补的机制。
 
-### Module 1: 3D-aware ViT
+## 核心方案
 
-**目标**：从单张 2D 图像中提取 3D 空间感知的视觉 token。
+### 方案 A：参考 ViLT 的视觉编码器预训练（Text-Conditioned ViT）
 
-**设计**：
-- 在标准 ViT 的基础上，并行一个 **Depth Estimation Branch**（基于 Depth Anything V2 初始化）
-- 每个 patch 不仅有 RGB 特征，还关联一个估计的深度值 z
-- 通过 **3D Feature Fusion Module** 将 (RGB_feature, depth_feature) 融合为 3D-aware token
-- 融合方式：Gated Cross-Attention，让 RGB 和 Depth 特征互相增强
+**核心思路**：参考 ViLT 将文本一起输入 ViT，让文本作为 query 来引导注意力学习图像中的空间信息。
 
-```python
-class ThreeDawareViT(nn.Module):
-    def __init__(self, base_vit, depth_encoder):
-        self.rgb_encoder = base_vit           # 预训练 ViT (e.g., SigLIP)
-        self.depth_encoder = depth_encoder     # 预训练 Depth Anything V2
-        self.fusion = GatedCrossAttention(dim=hidden_dim)
+- 在 ViT 的中间层注入文本 token，文本 token 通过 cross attention 与 image patches 交互
+- 文本携带空间意图（如"左边"、"上方"），引导 ViT 的 attention pattern 变得 spatially-aware
+- 门控机制（初始化为 0）渐进式引入文本信号，避免破坏预训练权重
+- **ViT 不冻结**，允许文本信号反向传播调整视觉编码（区别于 QA-ViT 冻结 ViT）
+- **从预训练 ViT 初始化**，数据效率更高（区别于 ViLT 从头训练）
 
-    def forward(self, image):
-        rgb_tokens = self.rgb_encoder(image)        # [B, N, D]
-        depth_map = self.depth_encoder(image)        # [B, H, W, 1]
-        depth_tokens = patchify_depth(depth_map)     # [B, N, D_depth]
-        fused_tokens = self.fusion(rgb_tokens, depth_tokens)  # [B, N, D]
-        return fused_tokens, depth_map
-```
+### 方案 B：给 LLM 注入 2D 位置信息（Spatial 2D RoPE）
 
-**关键点**：
-- Depth Branch 用 Depth Anything V2 初始化，提供强先验
-- 融合模块是可学习的，让模型自己决定 RGB 和 Depth 信息的权重
-- 输出的每个 token 都隐式包含了 3D 位置信息
+**核心思路**：给 LLM 中的视觉 token 使用 2D 旋转位置编码，替代默认的 1D 序列位置编码，让 LLM 的 self-attention 天然感知 patch 的 2D 空间邻接关系。
 
-### Module 2: Dual Coordinate Position Encoding
+- 视觉 token：将 head_dim 拆成四份，前半编码 row 位置，后半编码 col 位置
+- 文本 token：保持标准 1D RoPE 不变
+- 通过 `patch_llm_with_spatial_rope()` monkey-patch 到 LLM 的 rotary embedding 中
+- LLM 在做 self-attention 时，天然知道哪些 patch 是空间相邻的
 
-**目标**：让模型同时维护自我中心和世界中心两种空间表征。
+### 方案 C：重新设计 Cross Attention，显式考虑空间位置（Spatial-Aware Cross Attention）
 
-**设计**：
-
-```python
-class DualCoordinatePE(nn.Module):
-    def __init__(self, dim, max_positions=1024):
-        # Ego-centric: 以当前视角为原点的 3D RoPE
-        self.ego_rope = Rotary3DPositionEncoding(dim)
-        # Allocentric: 以世界坐标系为原点的 3D RoPE
-        self.allo_rope = Rotary3DPositionEncoding(dim)
-        # 可学习的坐标系切换门控
-        self.gate = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.Sigmoid()
-        )
-
-    def forward(self, tokens, ego_coords_3d, allo_coords_3d):
-        ego_pe = self.ego_rope(ego_coords_3d)    # 自我中心位置编码
-        allo_pe = self.allo_rope(allo_coords_3d)  # 世界中心位置编码
-        gate = self.gate(tokens)
-        return tokens + gate * ego_pe + (1 - gate) * allo_pe
-```
-
-**Ego-centric 坐标**：
-- 以当前 agent 位置为原点
-- (x, y) 来自 patch 在图像中的位置，z 来自 depth 估计
-- 适用于 Route-level 任务（路径推理、导航）
-
-**Allocentric 坐标**：
-- 以世界坐标系为原点
-- 需要结合 agent 的历史轨迹和 IMU/pose 信息推算
-- 适用于 Survey-level 任务（全局地图构建）
-
-**Learnable Switch**：
-- 不同的 attention layer 可能需要不同坐标系的信息
-- 门控机制让模型自动学习在什么情况下用哪种坐标系
-
-### Module 3: Spatial Belief Memory
-
-**目标**：解决 Belief Drift 和 Belief Inertia，提供稳定、可更新的空间记忆。
-
-#### 3.1 Scene Graph Memory Store
-
-```python
-class SpatialSceneGraph:
-    """
-    显式的空间场景图记忆。
-    每个节点代表一个物体，每条边代表两个物体之间的空间关系。
-    """
-    nodes: Dict[str, ObjectNode]
-    # ObjectNode = {
-    #     position: Tensor[3],        # 3D 坐标 (x, y, z)
-    #     orientation: Tensor[4],     # 四元数表示朝向
-    #     appearance: Tensor[D],      # 外观特征向量
-    #     confidence: float,          # 置信度 [0, 1]
-    #     timestamp: int,             # 最后更新时间步
-    #     observation_count: int      # 被观察次数
-    # }
-
-    edges: Dict[Tuple[str, str], RelationEdge]
-    # RelationEdge = {
-    #     relative_direction: Tensor[3],  # 相对方向向量
-    #     relative_distance: float,       # 相对距离
-    #     confidence: float
-    # }
-
-    agent_state: AgentState
-    # AgentState = {
-    #     position: Tensor[3],
-    #     orientation: Tensor[4],
-    #     timestamp: int
-    # }
-```
-
-#### 3.2 Confidence-Gated Write
-
-```python
-class ConfidenceGatedWriter(nn.Module):
-    """
-    置信度门控写入机制。
-    根据新旧信息的冲突程度和旧信息的置信度，决定如何更新记忆。
-    """
-    def __init__(self, dim):
-        self.conflict_detector = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-            nn.Sigmoid()
-        )
-        self.revision_gate = nn.Sequential(
-            nn.Linear(dim * 2 + 2, dim),  # +2 for confidence and conflict
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-            nn.Sigmoid()
-        )
-
-    def write(self, memory, new_observation, object_id):
-        old_node = memory.nodes[object_id]
-
-        # 1. 计算冲突程度
-        conflict = self.conflict_detector(
-            torch.cat([old_node.embedding, new_observation.embedding], dim=-1)
-        )
-
-        # 2. 门控决策
-        revision_input = torch.cat([
-            old_node.embedding,
-            new_observation.embedding,
-            old_node.confidence,
-            conflict
-        ], dim=-1)
-        revision_weight = self.revision_gate(revision_input)
-
-        # 3. 更新策略
-        # revision_weight 高 → 用新观察替换旧信息（Belief Revision）
-        # revision_weight 低 → 保持旧信息，微调（Belief Preservation）
-        updated_embedding = (
-            revision_weight * new_observation.embedding +
-            (1 - revision_weight) * old_node.embedding
-        )
-
-        # 4. 更新置信度
-        # 多次一致观察 → 置信度上升
-        # 冲突观察 → 置信度先下降再恢复
-        updated_confidence = self._update_confidence(
-            old_node.confidence, conflict, old_node.observation_count
-        )
-
-        return updated_embedding, updated_confidence
-```
-
-#### 3.3 Uncertainty-Aware Read
-
-```python
-class UncertaintyAwareReader(nn.Module):
-    """
-    不确定性感知的记忆读取。
-    在 LLM decoder 中通过 cross-attention 查询空间记忆，
-    同时输出 uncertainty signal 指导主动探索。
-    """
-    def __init__(self, dim, num_heads=8):
-        self.cross_attn = nn.MultiheadAttention(dim, num_heads)
-        self.uncertainty_head = nn.Linear(dim, 1)
-
-    def read(self, decoder_hidden, memory):
-        # 将场景图节点转为 key-value
-        memory_keys = memory.get_all_node_embeddings()      # [M, D]
-        memory_values = memory.get_all_node_embeddings()     # [M, D]
-        confidence_weights = memory.get_all_confidences()    # [M, 1]
-
-        # Cross-attention with confidence weighting
-        attn_output, attn_weights = self.cross_attn(
-            query=decoder_hidden,
-            key=memory_keys,
-            value=memory_values
-        )
-        # 用置信度加权 attention 输出
-        weighted_output = attn_output * confidence_weights.unsqueeze(0)
-
-        # 计算 uncertainty signal
-        uncertainty = self.uncertainty_head(weighted_output)  # [B, N, 1]
-
-        return weighted_output, uncertainty
-```
-
----
-
-## Training Strategy
-
-### 基座模型选择
-
-| 候选模型 | 优势 | 劣势 |
-|---------|------|------|
-| **Qwen2.5-VL-7B** | 开源、中文友好、ViT 架构清晰 | 社区相对较小 |
-| **InternVL2.5-8B** | 性能强、架构灵活 | 模型较大 |
-| **LLaVA-NeXT-7B** | 社区活跃、代码清晰 | 空间能力一般 |
-
-**推荐**：Qwen2.5-VL-7B 或 InternVL2.5-8B 作为起点。
-
-### 三阶段增量训练
+**核心思路**：重新设计视觉-语言对齐的 cross attention，让它在 attend 视觉特征时显式考虑空间位置，用文本中的空间意图引导 attention 偏向对应的空间区域。
 
 ```
-Stage 1: 3D Visual Grounding (3D 视觉对齐)
-├── 冻结: LLM Decoder
-├── 训练: 3D-aware ViT (Depth Branch + Fusion Module)
-├── 数据: Objaverse 多视角渲染 + ScanNet 室内场景 + Depth Anything 伪标签
-├── Loss: Depth Estimation Loss + 3D Feature Contrastive Loss
-└── 目标: 让视觉编码器能从单张图提取 3D 空间信息
-
-Stage 2: Spatial Memory Training (空间记忆训练)
-├── 冻结: 3D-aware ViT
-├── 训练: Spatial Belief Memory + Dual Coordinate PE + Projector
-├── 数据: 构造序列化空间探索数据（多步观察 → 构建场景图）
-├── Loss: Memory Reconstruction Loss + Belief Revision Loss
-│         + Uncertainty Calibration Loss
-└── 目标: 让记忆模块学会稳定存储和动态更新空间信息
-
-Stage 3: End-to-End Fine-tuning (端到端微调)
-├── 训练: 全参数（ViT + Memory + LLM，LLM 用 LoRA）
-├── 数据: Theory of Space benchmark 数据
-│         + 空间推理 instruction tuning 数据
-│         + 主动探索 + 信念修正数据
-├── Loss: Task Loss + Exploration Reward (信息增益)
-└── 目标: 端到端优化整个系统的空间智能
+传统：attention_score = Q_text @ K_visual.T / sqrt(d)
+本方案：attention_score = Q_text @ K_visual.T / sqrt(d) + λ * spatial_bias
 ```
 
-### 数据准备
+- **SpatialIntentExtractor**：用可学习 query 从文本序列中聚合空间意图（方向、距离、关系等）
+- **PositionIntentMatcher**：将空间意图与 patch 的归一化 2D 坐标匹配，生成每个 patch 的空间偏置
+- 可学习的 `spatial_bias_scale` 控制偏置强度
 
-#### Stage 1 数据
-- **Objaverse 多视角渲染**：从 Objaverse 3D 资产渲染多视角 RGB + Depth 图像对
-- **ScanNet / ScanNet++**：真实室内场景的 RGB-D 数据
-- **Depth Anything V2 伪标签**：对大规模图像数据生成深度伪标签
-
-#### Stage 2 数据
-- **序列化空间探索数据**：模拟 agent 在室内场景中移动，记录每步的观察和场景图变化
-- **信念修正数据**：构造"环境变化"场景，要求模型更新空间记忆
-- 可使用 **ThreeDWorld** 或 **Habitat** 模拟器生成
-
-#### Stage 3 数据
-- **Theory of Space benchmark**：论文提供的评估数据（[HuggingFace](https://huggingface.co/datasets/MLL-Lab/tos-data)）
-- **空间推理 instruction tuning**：构造空间推理 QA 对
-- **主动探索数据**：agent 自主探索 + 信息增益奖励
-
----
-
-## Evaluation
-
-### 主要评估基准
-
-1. **Theory of Space Benchmark** (ICLR 2026)
-   - Route-level 任务：Pairwise Direction, Perspective Taking, Action2View, View2Action
-   - Survey-level 任务：Allocentric Map, Mental Rotation, Location2View, View2Location
-   - 探索效率：步数、信息增益曲线
-   - 信念质量：Cognitive Map Probing（Correctness, Stability, Perception, Self-tracking）
-   - 信念修正：False Belief 范式（Belief Inertia 指标）
-
-2. **补充评估**
-   - ScanQA：3D 场景问答
-   - SQA3D：Situated Question Answering in 3D
-   - VSI-Bench：Video Spatial Intelligence
-
-### 目标指标
-
-| 指标 | 当前 SOTA (Gemini-3 Pro) | 我们的目标 |
-|------|------------------------|-----------|
-| Active Exploration Avg | 57.3% | **70%+** |
-| Cognitive Map Correctness (Vision) | 52.1% | **75%+** |
-| Belief Stability (Vision) | ~62% | **85%+** |
-| Belief Inertia (Vision, ↓) | 51.1% (ori) | **<20%** |
-| Active-Passive Gap | ~3-11% | **<3%** |
-
----
-
-## Project Structure
+## 项目结构
 
 ```
 vlm/
-├── README.md
-├── configs/                          # 训练配置
-│   ├── stage1_3d_grounding.yaml
-│   ├── stage2_spatial_memory.yaml
-│   └── stage3_end2end.yaml
+├── configs/
+│   └── default.yaml                          # 模型配置、训练超参数、数据集路径
 ├── src/
 │   ├── model/
-│   │   ├── three_d_aware_vit.py      # Module 1: 3D-aware ViT
-│   │   ├── depth_branch.py           # Depth Estimation Branch
-│   │   ├── dual_coordinate_pe.py     # Module 2: 双坐标系位置编码
-│   │   ├── spatial_belief_memory.py  # Module 3: 空间信念记忆
-│   │   │   ├── scene_graph.py        #   场景图存储
-│   │   │   ├── confidence_writer.py  #   置信度门控写入
-│   │   │   └── uncertainty_reader.py #   不确定性感知读取
-│   │   ├── spatial_vlm.py            # 完整模型组装
-│   │   └── projector.py              # 视觉-语言投影层
-│   ├── data/
-│   │   ├── objaverse_dataset.py      # Stage 1 数据
-│   │   ├── spatial_exploration.py    # Stage 2 数据
-│   │   └── tos_benchmark.py          # Stage 3 / 评估数据
-│   ├── training/
-│   │   ├── stage1_trainer.py
-│   │   ├── stage2_trainer.py
-│   │   └── stage3_trainer.py
-│   └── evaluation/
-│       ├── tos_evaluator.py          # Theory of Space 评估
-│       ├── belief_probing.py         # 认知地图探测
-│       └── metrics.py                # 评估指标
-├── scripts/
-│   ├── train_stage1.sh
-│   ├── train_stage2.sh
-│   ├── train_stage3.sh
-│   └── evaluate.sh
-├── requirements.txt
-└── 2602.07055v1.pdf                  # Theory of Space 论文
+│   │   ├── text_conditioned_vit/
+│   │   │   └── text_conditioned_vit.py       # 方案 A：TextInjectionLayer + TextConditionedViT
+│   │   ├── spatial_rope/
+│   │   │   └── spatial_2d_rope.py            # 方案 B：Spatial2DRoPE + HybridPositionEmbedding
+│   │   ├── spatial_cross_attention/
+│   │   │   └── spatial_cross_attention.py    # 方案 C：SpatialIntentExtractor + PositionIntentMatcher + SpatialAwareCrossAttention
+│   │   └── spatial_vlm/
+│   │       └── spatial_vlm.py                # 整合模型：SpatialVLM
+│   ├── data/                                 # 数据加载与预处理
+│   ├── training/                             # 训练流程
+│   └── evaluation/                           # 评估脚本
+└── requirements.txt
 ```
 
----
+## 模型 Pipeline
 
-## Quick Start
+```
+Input Image + Text Query
+        │
+        ├──────────────────────┐
+        ▼                      ▼
+┌──────────────┐    ┌──────────────────┐
+│ Text Encoder │    │ 方案 A:           │
+│  (frozen)    │───▶│ Text-Conditioned │ ── 文本作为 query 引导 ViT
+│              │    │ ViT              │    注意力学习空间信息
+└──────┬───────┘    └────────┬─────────┘
+       │                     │ visual_features
+       │                     ▼
+       │            ┌──────────────────┐
+       │            │ Visual Projector │ ── 投影到 LLM 空间
+       │            └────────┬─────────┘
+       │                     │
+       ▼                     ▼
+┌─────────────────────────────────────┐
+│ 方案 C: Spatial-Aware Cross Attn    │ ── 从文本提取空间意图
+│ attention += λ * spatial_bias       │    引导 attend 对应空间区域
+└──────────────────┬──────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────┐
+│ LLM Decoder                         │
+│ 方案 B: 视觉 token → 2D RoPE        │ ── LLM 天然感知 2D 空间位置
+│         文本 token → 1D RoPE        │
+└──────────────────┬──────────────────┘
+                   │
+                   ▼
+              Output Text
+```
 
-### 环境安装
+## 训练策略
+
+### 阶段 1：对齐预训练
+- **冻结**：ViT + LLM
+- **训练**：TextInjectionLayer、Visual Projector、SpatialAwareCrossAttention、text_projector
+- 学习率：1e-3，batch size：256
+
+### 阶段 2：全量微调
+- **解冻**：所有模块（包括 ViT，让文本信号反向传播调整视觉编码）
+- 学习率：2e-5，batch size：64
+
+## 评估 Benchmark
+
+- **VSI-Bench**：视觉空间推理
+- **SpatialQA**：空间问答
+- **Theory-of-Space**：空间感知综合评估（Active-Passive Gap、Belief Drift、Belief Inertia）
+- **PerceptionTest**：通用视觉感知
+- **TempCompass**：时序理解
+
+## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 训练
+## 相关论文
 
-```bash
-# Stage 1: 3D Visual Grounding
-bash scripts/train_stage1.sh
-
-# Stage 2: Spatial Memory Training
-bash scripts/train_stage2.sh
-
-# Stage 3: End-to-End Fine-tuning
-bash scripts/train_stage3.sh
-```
-
-### 评估
-
-```bash
-# Theory of Space Benchmark
-bash scripts/evaluate.sh
-```
-
----
-
-## Key References
-
-- **Theory of Space** (ICLR 2026): [arXiv:2602.07055](https://arxiv.org/abs/2602.07055) | [GitHub](https://github.com/mll-lab-nu/Theory-of-Space) | [Data](https://huggingface.co/datasets/MLL-Lab/tos-data)
-- **Depth Anything V2**: [arXiv:2406.09414](https://arxiv.org/abs/2406.09414)
-- **Qwen2.5-VL**: [arXiv:2502.13923](https://arxiv.org/abs/2502.13923)
-- **NeRF**: [arXiv:2003.08934](https://arxiv.org/abs/2003.08934)
-- **SpatialRGPT**: [arXiv:2406.01584](https://arxiv.org/abs/2406.01584)
-- **SpatialVLM (Chen et al.)**: [arXiv:2401.12168](https://arxiv.org/abs/2401.12168)
-
----
-
-## License
-
-Apache 2.0
+- **ViLT (ICML 2021)**：image patches 和 text tokens 联合 self-attention，本项目方案 A 的核心参考
+- **QA-ViT (CVPR 2024)**：在 ViT 层间注入文本 token（冻结 ViT），方案 A 在此基础上解冻 ViT
+- **Theory of Space (ICLR 2026)**：VLM 空间感知能力评估框架，发现三大核心缺陷
+- **V-JEPA 2 (Meta, 2025)**：自监督视频模型，证明隐空间预测能学到 3D 空间结构，但接 LLM 后提升有限
+- **Spatial-SSRL (2025)**：空间自监督预训练任务，效果有限（+4.63%），佐证训练信号路线的局限性

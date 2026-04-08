@@ -1,0 +1,93 @@
+# Spatial VLM 默认配置
+
+model:
+  # 视觉编码器
+  vit:
+    name: "google/siglip-so400m-patch14-384"
+    image_size: 384
+    patch_size: 14
+    visual_dim: 1152
+
+  # LLM
+  llm:
+    name: "meta-llama/Llama-3.1-8B-Instruct"
+    llm_dim: 4096
+    num_heads: 32
+
+  # 方案开关
+  enable_text_conditioned_vit: true
+  enable_spatial_rope: true
+  enable_spatial_cross_attention: true
+
+  # Text-Conditioned ViT (方案 A)
+  text_conditioned_vit:
+    injection_layers: [9, 18]  # 27 层 ViT 的 1/3 和 2/3 处
+    num_heads: 8
+    dropout: 0.1
+
+  # Spatial 2D RoPE (方案 B)
+  spatial_rope:
+    max_grid_size: 32
+    base: 10000.0
+
+  # Spatial-Aware Cross Attention (方案 C)
+  spatial_cross_attention:
+    spatial_intent_dim: 64
+    num_heads: 8
+    dropout: 0.1
+
+  # 视觉投影器
+  projector:
+    type: "mlp"
+    hidden_dim: 4096
+
+training:
+  # 阶段 1：对齐预训练（冻结 ViT 和 LLM，只训练新增模块）
+  stage1:
+    epochs: 1
+    learning_rate: 1.0e-3
+    batch_size: 256
+    freeze_vit: true
+    freeze_llm: true
+    warmup_steps: 1000
+
+  # 阶段 2：全量微调
+  stage2:
+    epochs: 1
+    learning_rate: 2.0e-5
+    batch_size: 64
+    freeze_vit: false
+    freeze_llm: false
+    warmup_steps: 500
+
+  optimizer:
+    name: "adamw"
+    weight_decay: 0.05
+    betas: [0.9, 0.999]
+
+  scheduler:
+    name: "cosine"
+    min_lr: 1.0e-6
+
+data:
+  # 空间推理数据集
+  spatial_datasets:
+    - name: "VSI-Bench"
+      path: "data/vsi_bench"
+    - name: "SpatialQA"
+      path: "data/spatial_qa"
+    - name: "Theory-of-Space"
+      path: "data/theory_of_space"
+
+  # 通用 VQA 数据集（防止灾难性遗忘）
+  general_datasets:
+    - name: "LLaVA-Instruct-150K"
+      path: "data/llava_instruct"
+
+evaluation:
+  benchmarks:
+    - "VSI-Bench"
+    - "SpatialQA"
+    - "Theory-of-Space"
+    - "PerceptionTest"
+    - "TempCompass"
