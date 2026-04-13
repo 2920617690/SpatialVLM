@@ -28,15 +28,29 @@
 
 ## 核心方案
 
-### 方案 A：参考 ViLT 的视觉编码器预训练（Text-Conditioned ViT）
+### 方案 A：DFlash 风格 KV Injection（Text-Conditioned ViT）
 
-**核心思路**：参考 ViLT 将文本一起输入 ViT，让文本作为 query 来引导注意力学习图像中的空间信息。
+**核心思路**：受 DFlash（2602.06036）启发，将文本特征直接注入 ViT 每层 attention 的 KV cache，让 visual patch queries 直接 attend 到文本 KV entries，实现持续、不稀释的文本引导。
 
-- 在 ViT 的中间层注入文本 token，文本 token 通过 cross attention 与 image patches 交互
-- 文本携带空间意图（如"左边"、"上方"），引导 ViT 的 attention pattern 变得 spatially-aware
-- 门控机制（初始化为 0）渐进式引入文本信号，避免破坏预训练权重
-- **ViT 不冻结**，允许文本信号反向传播调整视觉编码（区别于 QA-ViT 冻结 ViT）
-- **从预训练 ViT 初始化**，数据效率更高（区别于 ViLT 从头训练）
+**"第三人称"定位**：文本块不独立理解图像，只作为引导器持续提供空间意图条件——类比 DFlash 中扩散块借助 target model 的深层语义做高效并行 draft。
+
+- **KV Injection**：将文本 embeddings 压缩为 compact context feature (256d)，通过每层独立的 K/V 投影头注入 ViT attention
+- 每层 attention 的 K/V 被扩展：`K = [K_visual | K_text]`，`V = [V_visual | V_text]`
+- **全层注入**（默认 27 层全部注入），文本引导信号在每一层都持续存在，不随层数增加而稀释
+- Per-head gate（初始化为 0），启动时等价于原始 ViT，渐进式引入文本条件
+- 通过 monkey-patch SigLIP attention forward 实现，对 ViT 其他部分完全透明
+
+**与 DFlash 的类比**：
+
+| DFlash | 方案 A |
+|--------|--------|
+| target LLM hidden features → fuse → inject into drafter KV | text encoder features → compress → inject into ViT KV |
+| 扩散块作为 decoder 的轻量 adapter | 文本块作为 ViT 的轻量 adapter |
+| KV injection 到每层，信号不稀释 | KV injection 到 ViT 每层，信号持续 |
+
+**与传统方案的区别**：
+- 区别于 QA-ViT（冻结 ViT + 仅 2 层注入 + additive bias）：本方案全层 KV injection，信号直接参与 attention
+- 区别于 ViLT（从头训练）：从预训练 ViT 初始化，gate=0 保证安全启动
 
 ### 方案 B：给 LLM 注入 2D 位置信息（Spatial 2D RoPE）
 
@@ -69,7 +83,8 @@ vlm/
 ├── src/
 │   ├── model/
 │   │   ├── text_conditioned_vit/
-│   │   │   └── text_conditioned_vit.py       # 方案 A：TextInjectionLayer + TextConditionedViT
+│   │   │   ├── text_conditioned_vit.py       # 方案 A 传统实现：TextInjectionLayer + TextConditionedViT
+│   │   │   └── text_conditioned_vit_kv.py    # 方案 A KV Injection：TextContextEncoder + KVInjectionHead + TextConditionedViTKV
 │   │   ├── spatial_rope/
 │   │   │   └── spatial_2d_rope.py            # 方案 B：Spatial2DRoPE + HybridPositionEmbedding
 │   │   ├── spatial_cross_attention/
@@ -91,8 +106,8 @@ Input Image + Text Query
         ▼                      ▼
 ┌──────────────┐    ┌──────────────────┐
 │ Text Encoder │    │ 方案 A:           │
-│  (frozen)    │───▶│ Text-Conditioned │ ── 文本作为 query 引导 ViT
-│              │    │ ViT              │    注意力学习空间信息
+│  (frozen)    │───▶│ Text-Conditioned │ ── 文本 compress 为 context (256d)
+│              │    │ ViT (KV Inject)  │    注入每层 attention 的 KV cache
 └──────┬───────┘    └────────┬─────────┘
        │                     │ visual_features
        │                     ▼
@@ -121,7 +136,7 @@ Input Image + Text Query
 
 ### 阶段 1：对齐预训练
 - **冻结**：ViT + LLM
-- **训练**：TextInjectionLayer、Visual Projector、SpatialAwareCrossAttention、text_projector
+- **训练**：TextContextEncoder、KVInjectionHead（×27 层）、Visual Projector、SpatialAwareCrossAttention、text_projector
 - 学习率：1e-3，batch size：256
 
 ### 阶段 2：全量微调
@@ -144,8 +159,9 @@ pip install -r requirements.txt
 
 ## 相关论文
 
-- **ViLT (ICML 2021)**：image patches 和 text tokens 联合 self-attention，本项目方案 A 的核心参考
-- **QA-ViT (CVPR 2024)**：在 ViT 层间注入文本 token（冻结 ViT），方案 A 在此基础上解冻 ViT
+- **DFlash (2026)**：block diffusion 加速推理，通过 KV injection 将 target model context feature 注入 drafter 每层，实现持续条件化。**方案 A KV injection 的核心灵感来源**
+- **ViLT (ICML 2021)**：image patches 和 text tokens 联合 self-attention，方案 A 的早期参考
+- **QA-ViT (CVPR 2024)**：在 ViT 层间注入文本 token（冻结 ViT），方案 A 在此基础上改进为全层 KV injection
 - **Theory of Space (ICLR 2026)**：VLM 空间感知能力评估框架，发现三大核心缺陷
 - **V-JEPA 2 (Meta, 2025)**：自监督视频模型，证明隐空间预测能学到 3D 空间结构，但接 LLM 后提升有限
 - **Spatial-SSRL (2025)**：空间自监督预训练任务，效果有限（+4.63%），佐证训练信号路线的局限性

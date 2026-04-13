@@ -13,3 +13,4 @@ wandb/
 outputs/
 checkpoints/
 .DS_Store
+*.pdf

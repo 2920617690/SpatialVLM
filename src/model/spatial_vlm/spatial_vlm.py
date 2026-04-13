@@ -21,6 +21,7 @@ from typing import Optional, Dict, Any, Tuple
 from functools import partial
 
 from src.model.text_conditioned_vit.text_conditioned_vit import TextConditionedViT
+from src.model.text_conditioned_vit.text_conditioned_vit_kv import TextConditionedViTKV
 from src.model.spatial_rope.spatial_2d_rope import HybridPositionEmbedding
 from src.model.spatial_cross_attention.spatial_cross_attention import SpatialAwareCrossAttention
 
@@ -49,6 +50,8 @@ class SpatialVLM(nn.Module):
         enable_spatial_rope: bool = True,
         enable_spatial_cross_attention: bool = True,
         injection_layers: Optional[list] = None,
+        scheme_a_mode: str = "kv_injection",
+        context_dim: int = 256,
     ):
         """
         Args:
@@ -65,6 +68,8 @@ class SpatialVLM(nn.Module):
             enable_spatial_rope: 是否启用方案 B
             enable_spatial_cross_attention: 是否启用方案 C
             injection_layers: Text-Conditioned ViT 的注入层索引
+            scheme_a_mode: 方案 A 模式，"kv_injection"（DFlash 风格）或 "cross_attention"（传统）
+            context_dim: KV injection 模式下的 context 压缩维度
         """
         super().__init__()
 
@@ -82,12 +87,21 @@ class SpatialVLM(nn.Module):
 
         # 方案 A：Text-Conditioned ViT
         if enable_text_conditioned_vit:
-            self.visual_encoder = TextConditionedViT(
-                vit_encoder=vit_encoder,
-                text_dim=text_dim,
-                injection_layers=injection_layers,
-                num_heads=num_heads,
-            )
+            if scheme_a_mode == "kv_injection":
+                self.visual_encoder = TextConditionedViTKV(
+                    vit_encoder=vit_encoder,
+                    text_dim=text_dim,
+                    context_dim=context_dim,
+                    injection_layers=injection_layers,
+                    num_heads=self._get_vit_num_heads(vit_encoder),
+                )
+            else:
+                self.visual_encoder = TextConditionedViT(
+                    vit_encoder=vit_encoder,
+                    text_dim=text_dim,
+                    injection_layers=injection_layers,
+                    num_heads=num_heads,
+                )
         else:
             self.visual_encoder = vit_encoder
 
@@ -196,6 +210,18 @@ class SpatialVLM(nn.Module):
             if rotary_emb is not None:
                 rotary_emb.forward = self._original_rotary_emb_forward
             self._original_rotary_emb_forward = None
+
+    @staticmethod
+    def _get_vit_num_heads(vit_encoder: nn.Module) -> int:
+        """从 ViT 编码器中推断 attention head 数量。"""
+        if hasattr(vit_encoder, "config") and hasattr(vit_encoder.config, "num_attention_heads"):
+            return vit_encoder.config.num_attention_heads
+        # 回退：从第一层 attention 推断
+        if hasattr(vit_encoder, "encoder") and hasattr(vit_encoder.encoder, "layers"):
+            first_attn = vit_encoder.encoder.layers[0].self_attn
+            if hasattr(first_attn, "num_heads"):
+                return first_attn.num_heads
+        return 16  # SigLIP SO400M 默认值
 
     @staticmethod
     def _find_rotary_emb(llm: nn.Module):
