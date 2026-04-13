@@ -354,3 +354,51 @@ class TextConditionedViTKV(nn.Module):
             self._text_context_holder.clear()
 
         return hidden_states
+
+    def forward_from_embeddings(
+        self,
+        patch_embeddings: torch.Tensor,
+        text_tokens: torch.Tensor,
+        text_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """从预计算的 patch embeddings 开始 forward（跳过 patch embed 层）。
+
+        用于预训练时在 embedding 级别做 masking：先获取 patch embeddings，
+        替换被遮挡位置为 mask token，再送入 ViT transformer 层。
+
+        Args:
+            patch_embeddings: (B, N, visual_dim) 已处理的 patch embeddings
+            text_tokens: (B, T, text_dim) 文本编码器输出
+            text_padding_mask: (B, T) True 表示 padding 位置
+
+        Returns:
+            visual_features: (B, N, visual_dim)
+        """
+        # 编码文本为 compact context
+        text_context = self.text_context_encoder(text_tokens)
+        if text_padding_mask is not None:
+            text_context = text_context.masked_fill(
+                text_padding_mask.unsqueeze(-1), 0.0
+            )
+
+        # 存入 holder
+        self._text_context_holder["text_context"] = text_context
+        self._text_context_holder["text_padding_mask"] = text_padding_mask
+
+        try:
+            hidden_states = patch_embeddings
+            for layer in self.vit_layers:
+                # SigLIP encoder layer 返回 tensor（不是 tuple）
+                layer_output = layer(hidden_states, attention_mask=None)
+                if isinstance(layer_output, tuple):
+                    hidden_states = layer_output[0]
+                else:
+                    hidden_states = layer_output
+
+            # 应用 post-layernorm（如果存在）
+            if hasattr(self.vit_encoder, "post_layernorm"):
+                hidden_states = self.vit_encoder.post_layernorm(hidden_states)
+        finally:
+            self._text_context_holder.clear()
+
+        return hidden_states

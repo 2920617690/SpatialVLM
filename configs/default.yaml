@@ -93,3 +93,51 @@ evaluation:
     - "Theory-of-Space"
     - "PerceptionTest"
     - "TempCompass"
+
+# Text-Conditioned Latent Prediction 预训练
+pretraining:
+  # Target Encoder (EMA)
+  target_encoder:
+    ema_decay: 0.996
+    ema_decay_end: 1.0
+
+  # Latent Predictor
+  predictor:
+    dim: 384
+    num_layers: 3
+    num_heads: 6
+    mlp_ratio: 4.0
+    dropout: 0.1
+
+  # 文本条件化空间掩码
+  masking:
+    mask_ratio: 0.5
+    min_mask_ratio: 0.3
+    max_mask_ratio: 0.7
+    directional_prob: 0.5      # 方向掩码（文本空间词引导）
+    block_prob: 0.25           # Block 掩码（bbox 引导）
+    random_prob: 0.25          # 随机掩码（正则化）
+
+  # Loss
+  loss:
+    type: "smooth_l1"
+    feature_norm: true
+
+  # 训练超参数
+  training:
+    epochs: 5
+    learning_rate: 1.0e-3
+    batch_size: 256
+    warmup_steps: 2000
+    weight_decay: 0.05
+    grad_clip: 1.0
+    use_amp: true
+
+  # 数据
+  data:
+    format: "refcoco"
+    data_root: "data/refcoco"
+    precomputed_text_features: "data/refcoco/text_features.pt"
+    spatial_filter: true
+    max_text_length: 77
+    num_workers: 8

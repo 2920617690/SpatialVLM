@@ -92,7 +92,9 @@ vlm/
 │   │   └── spatial_vlm/
 │   │       └── spatial_vlm.py                # 整合模型：SpatialVLM
 │   ├── data/                                 # 数据加载与预处理
+│   │   └── pretrain_dataset.py               # 预训练数据集：SpatialPretrainDataset
 │   ├── training/                             # 训练流程
+│   │   └── pretrain_spatial.py               # 预训练：SpatialMaskGenerator + LatentPredictor + TextConditionedPretrainer
 │   └── evaluation/                           # 评估脚本
 └── requirements.txt
 ```
@@ -134,9 +136,31 @@ Input Image + Text Query
 
 ## 训练策略
 
+### 阶段 0：Text-Conditioned Latent Prediction 预训练（KV Injection 模块）
+
+**核心创新**：将 V-JEPA 的隐空间预测与文本条件化 KV Injection 结合——V-JEPA 证明隐空间预测能学到空间结构，但它是无条件的，接 VLM 后提升有限。我们加上文本条件化，让预训练直接学到"带着问题去看"的能力。
+
+```
+Target Encoder (EMA):  原始 ViT → 完整图像 → target features
+Context Encoder:       TextConditionedViTKV → 部分可见 + 文本 KV → context features
+Predictor (3层):       context + mask tokens + 文本 cross-attn → 预测遮挡区域的 latent features
+Loss:                  Smooth L1 on L2-normalized features（只在遮挡位置计算）
+```
+
+**文本条件化空间掩码**（区别于 V-JEPA 的随机掩码）：
+- 文本含"左边" → 遮左半区域 → 模型必须用文本空间线索预测
+- 文本含 bbox → 遮 bbox 覆盖区域（block masking）
+- 25% 随机掩码作为正则化
+- 三种策略按概率混合：directional 50% / block 25% / random 25%
+
+**数据**：RefCOCO/RefCOCOg（referring expression + bbox，天然空间描述）
+
+**预训练后**：只保留 TextContextEncoder + KVInjectionHeads 迁移到 SpatialVLM。Predictor 和 target encoder 丢弃。
+
 ### 阶段 1：对齐预训练
 - **冻结**：ViT + LLM
 - **训练**：TextContextEncoder、KVInjectionHead（×27 层）、Visual Projector、SpatialAwareCrossAttention、text_projector
+- **初始化**：从阶段 0 加载预训练的 KV Injection 权重
 - 学习率：1e-3，batch size：256
 
 ### 阶段 2：全量微调
@@ -163,5 +187,5 @@ pip install -r requirements.txt
 - **ViLT (ICML 2021)**：image patches 和 text tokens 联合 self-attention，方案 A 的早期参考
 - **QA-ViT (CVPR 2024)**：在 ViT 层间注入文本 token（冻结 ViT），方案 A 在此基础上改进为全层 KV injection
 - **Theory of Space (ICLR 2026)**：VLM 空间感知能力评估框架，发现三大核心缺陷
-- **V-JEPA 2 (Meta, 2025)**：自监督视频模型，证明隐空间预测能学到 3D 空间结构，但接 LLM 后提升有限
+- **V-JEPA 2 (Meta, 2025)**：自监督视频模型，证明隐空间预测能学到 3D 空间结构，但无条件化导致接 LLM 后提升有限。**阶段 0 预训练的核心灵感来源**——我们加上文本条件化解决这一局限
 - **Spatial-SSRL (2025)**：空间自监督预训练任务，效果有限（+4.63%），佐证训练信号路线的局限性
