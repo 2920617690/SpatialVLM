@@ -24,6 +24,7 @@ from src.model.text_conditioned_vit.text_conditioned_vit import TextConditionedV
 from src.model.text_conditioned_vit.text_conditioned_vit_kv import TextConditionedViTKV
 from src.model.spatial_rope.spatial_2d_rope import HybridPositionEmbedding
 from src.model.spatial_cross_attention.spatial_cross_attention import SpatialAwareCrossAttention
+from src.model.latent_reasoning.latent_reasoning_loop import LatentReasoningLoop
 
 
 class SpatialVLM(nn.Module):
@@ -52,6 +53,12 @@ class SpatialVLM(nn.Module):
         injection_layers: Optional[list] = None,
         scheme_a_mode: str = "kv_injection",
         context_dim: int = 256,
+        enable_latent_reasoning_loop: bool = False,
+        latent_dim: int = 512,
+        num_latent_tokens: int = 8,
+        num_iterations: int = 4,
+        reasoning_num_heads: int = 8,
+        share_reasoning_weights: bool = True,
     ):
         """
         Args:
@@ -70,6 +77,12 @@ class SpatialVLM(nn.Module):
             injection_layers: Text-Conditioned ViT 的注入层索引
             scheme_a_mode: 方案 A 模式，"kv_injection"（DFlash 风格）或 "cross_attention"（传统）
             context_dim: KV injection 模式下的 context 压缩维度
+            enable_latent_reasoning_loop: 是否启用 Latent Reasoning Loop（替代方案 C）
+            latent_dim: Reasoning Loop 隐空间维度
+            num_latent_tokens: Reasoning Loop 的 latent tokens 数量
+            num_iterations: Reasoning Loop 迭代次数
+            reasoning_num_heads: Reasoning Loop attention head 数
+            share_reasoning_weights: Reasoning Loop 是否共享权重
         """
         super().__init__()
 
@@ -81,6 +94,12 @@ class SpatialVLM(nn.Module):
         self.enable_text_conditioned_vit = enable_text_conditioned_vit
         self.enable_spatial_rope = enable_spatial_rope
         self.enable_spatial_cross_attention = enable_spatial_cross_attention
+        self.enable_latent_reasoning_loop = enable_latent_reasoning_loop
+
+        # Latent Reasoning Loop 和 Scheme C 互斥
+        assert not (enable_spatial_cross_attention and enable_latent_reasoning_loop), \
+            "Cannot enable both spatial_cross_attention and latent_reasoning_loop. " \
+            "Latent Reasoning Loop replaces Scheme C."
 
         # 文本编码器
         self.text_encoder = text_encoder
@@ -136,6 +155,20 @@ class SpatialVLM(nn.Module):
                 text_dim=llm_dim,
                 visual_dim=llm_dim,
                 num_heads=num_heads,
+            )
+
+        # Latent Reasoning Loop（替代方案 C）
+        if enable_latent_reasoning_loop:
+            self.latent_reasoning_loop = LatentReasoningLoop(
+                visual_dim=visual_dim,
+                text_dim=text_dim,
+                latent_dim=latent_dim,
+                num_latent_tokens=num_latent_tokens,
+                num_iterations=num_iterations,
+                num_heads=reasoning_num_heads,
+                output_dim=llm_dim,
+                max_grid_size=max(grid_height, grid_width) + 1,
+                share_weights=share_reasoning_weights,
             )
 
         # LLM 解码器
@@ -275,6 +308,27 @@ class SpatialVLM(nn.Module):
             "Expected output with 'last_hidden_state', 'hidden_states', or a raw Tensor."
         )
 
+    def _encode_visual_raw(
+        self,
+        pixel_values: torch.Tensor,
+        text_tokens: Optional[torch.Tensor] = None,
+        text_padding_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """编码视觉输入，返回 projector 之前的原始 ViT 特征。"""
+        if self.enable_text_conditioned_vit and text_tokens is not None:
+            return self.visual_encoder(
+                pixel_values=pixel_values,
+                text_tokens=text_tokens,
+                text_padding_mask=text_padding_mask,
+            )
+        else:
+            visual_outputs = self.visual_encoder(pixel_values)
+            if hasattr(visual_outputs, "last_hidden_state"):
+                return visual_outputs.last_hidden_state
+            elif isinstance(visual_outputs, torch.Tensor):
+                return visual_outputs
+            return visual_outputs[0]
+
     def encode_visual(
         self,
         pixel_values: torch.Tensor,
@@ -282,18 +336,8 @@ class SpatialVLM(nn.Module):
         text_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """编码视觉输入，可选地使用文本引导。"""
-        if self.enable_text_conditioned_vit and text_tokens is not None:
-            visual_features = self.visual_encoder(
-                pixel_values=pixel_values,
-                text_tokens=text_tokens,
-                text_padding_mask=text_padding_mask,
-            )
-        else:
-            visual_features = self.visual_encoder(pixel_values)
-
-        # 投影到 LLM 空间
-        projected_visual = self.visual_projector(visual_features)
-        return projected_visual
+        raw = self._encode_visual_raw(pixel_values, text_tokens, text_padding_mask)
+        return self.visual_projector(raw)
 
     def forward(
         self,
@@ -318,23 +362,33 @@ class SpatialVLM(nn.Module):
         """
         grid_height = grid_height or self.grid_height
         grid_width = grid_width or self.grid_width
+        batch_size = pixel_values.shape[0]
 
         # Step 1: 编码文本
         text_padding_mask = ~attention_mask.bool() if attention_mask is not None else None
         text_hidden_states = self.encode_text(input_ids, attention_mask)
 
-        # Step 2: 编码视觉（可选文本引导）
-        visual_features = self.encode_visual(
-            pixel_values=pixel_values,
-            text_tokens=text_hidden_states,
-            text_padding_mask=text_padding_mask,
+        # Step 2: 编码视觉
+        raw_visual_features = self._encode_visual_raw(
+            pixel_values, text_hidden_states, text_padding_mask
         )
+        visual_features = self.visual_projector(raw_visual_features)
 
-        # Step 3: 将文本特征投影到 LLM 空间（处理 text_dim != llm_dim 的情况）
-        text_in_llm_space = self.text_projector(text_hidden_states)
+        # Step 3: 空间推理（Latent Reasoning Loop 或 方案 C，互斥）
+        reasoning_tokens = None
+        cross_attention_weights = None
 
-        # Step 4: 空间感知的 Cross Attention（方案 C）
-        if self.enable_spatial_cross_attention:
+        if self.enable_latent_reasoning_loop:
+            # Latent Reasoning Loop：在原始 ViT 特征上迭代推理
+            reasoning_tokens = self.latent_reasoning_loop(
+                patch_features=raw_visual_features,
+                text_hidden_states=text_hidden_states,
+                text_padding_mask=text_padding_mask,
+                grid_height=grid_height,
+                grid_width=grid_width,
+            )  # (B, K, llm_dim)
+        elif self.enable_spatial_cross_attention:
+            text_in_llm_space = self.text_projector(text_hidden_states)
             aligned_features, cross_attention_weights = self.spatial_cross_attention(
                 text_hidden_states=text_in_llm_space,
                 visual_features=visual_features,
@@ -342,32 +396,48 @@ class SpatialVLM(nn.Module):
                 grid_width=grid_width,
                 text_padding_mask=text_padding_mask,
             )
-        else:
-            aligned_features = text_in_llm_space
-            cross_attention_weights = None
 
-        # Step 5: 拼接视觉和文本 token 送入 LLM
-        # 排列顺序：[visual_tokens | text_tokens]
-        # 方案 B 的 HybridPositionEmbedding 依赖此排列顺序，
-        # 在 patch_llm_with_spatial_rope() 中已将 LLM 的 RoPE 替换为
+        # Step 4: 拼接送入 LLM
+        # 方案 B 的 HybridPositionEmbedding 依赖排列顺序：
         # 对前 num_visual_tokens 个位置使用 2D RoPE，后续位置使用 1D RoPE
-        combined_input = torch.cat([visual_features, aligned_features], dim=1)
+        if self.enable_latent_reasoning_loop:
+            # [visual_tokens | reasoning_tokens | text_tokens]
+            text_embeds = self.text_projector(text_hidden_states)
+            combined_input = torch.cat([visual_features, reasoning_tokens, text_embeds], dim=1)
 
-        # 构建 combined attention mask
-        batch_size = pixel_values.shape[0]
-        num_visual_tokens = visual_features.shape[1]
-        visual_attention_mask = torch.ones(
-            batch_size, num_visual_tokens, dtype=torch.long, device=pixel_values.device
-        )
-        if attention_mask is not None:
-            combined_attention_mask = torch.cat([visual_attention_mask, attention_mask], dim=1)
+            visual_mask = torch.ones(batch_size, visual_features.shape[1],
+                                     dtype=torch.long, device=pixel_values.device)
+            reasoning_mask = torch.ones(batch_size, reasoning_tokens.shape[1],
+                                        dtype=torch.long, device=pixel_values.device)
+            if attention_mask is not None:
+                combined_attention_mask = torch.cat([visual_mask, reasoning_mask, attention_mask], dim=1)
+            else:
+                text_mask = torch.ones(batch_size, text_embeds.shape[1],
+                                       dtype=torch.long, device=pixel_values.device)
+                combined_attention_mask = torch.cat([visual_mask, reasoning_mask, text_mask], dim=1)
+        elif self.enable_spatial_cross_attention:
+            combined_input = torch.cat([visual_features, aligned_features], dim=1)
+            visual_mask = torch.ones(batch_size, visual_features.shape[1],
+                                     dtype=torch.long, device=pixel_values.device)
+            if attention_mask is not None:
+                combined_attention_mask = torch.cat([visual_mask, attention_mask], dim=1)
+            else:
+                text_mask = torch.ones(batch_size, aligned_features.shape[1],
+                                       dtype=torch.long, device=pixel_values.device)
+                combined_attention_mask = torch.cat([visual_mask, text_mask], dim=1)
         else:
-            text_attention_mask = torch.ones(
-                batch_size, aligned_features.shape[1], dtype=torch.long, device=pixel_values.device
-            )
-            combined_attention_mask = torch.cat([visual_attention_mask, text_attention_mask], dim=1)
+            text_in_llm_space = self.text_projector(text_hidden_states)
+            combined_input = torch.cat([visual_features, text_in_llm_space], dim=1)
+            visual_mask = torch.ones(batch_size, visual_features.shape[1],
+                                     dtype=torch.long, device=pixel_values.device)
+            if attention_mask is not None:
+                combined_attention_mask = torch.cat([visual_mask, attention_mask], dim=1)
+            else:
+                text_mask = torch.ones(batch_size, text_in_llm_space.shape[1],
+                                       dtype=torch.long, device=pixel_values.device)
+                combined_attention_mask = torch.cat([visual_mask, text_mask], dim=1)
 
-        # Step 6: LLM 解码
+        # Step 5: LLM 解码
         outputs = self.llm_decoder(
             inputs_embeds=combined_input,
             attention_mask=combined_attention_mask,

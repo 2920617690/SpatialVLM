@@ -17,7 +17,8 @@ model:
   # 方案开关
   enable_text_conditioned_vit: true
   enable_spatial_rope: true
-  enable_spatial_cross_attention: true
+  enable_spatial_cross_attention: false     # 被 Latent Reasoning Loop 替代
+  enable_latent_reasoning_loop: true       # 隐空间迭代推理（替代方案 C）
 
   # Text-Conditioned ViT (方案 A)
   text_conditioned_vit:
@@ -32,11 +33,21 @@ model:
     max_grid_size: 32
     base: 10000.0
 
-  # Spatial-Aware Cross Attention (方案 C)
+  # Spatial-Aware Cross Attention (方案 C，已被 Latent Reasoning Loop 替代)
   spatial_cross_attention:
     spatial_intent_dim: 64
     num_heads: 8
     dropout: 0.1
+
+  # Latent Reasoning Loop（替代方案 C）
+  latent_reasoning_loop:
+    latent_dim: 512              # 隐空间维度（瓶颈）
+    num_latent_tokens: 8         # latent tokens 数量
+    num_iterations: 4            # 迭代轮数
+    num_heads: 8                 # attention heads
+    mlp_ratio: 4.0
+    dropout: 0.1
+    share_weights: true          # 所有迭代共享同一个 ReasoningBlock
 
   # 视觉投影器
   projector:

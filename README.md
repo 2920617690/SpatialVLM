@@ -61,18 +61,24 @@
 - 通过 `patch_llm_with_spatial_rope()` monkey-patch 到 LLM 的 rotary embedding 中
 - LLM 在做 self-attention 时，天然知道哪些 patch 是空间相邻的
 
-### 方案 C：重新设计 Cross Attention，显式考虑空间位置（Spatial-Aware Cross Attention）
+### 方案 C：Latent Reasoning Loop（隐空间迭代推理）
 
-**核心思路**：重新设计视觉-语言对齐的 cross attention，让它在 attend 视觉特征时显式考虑空间位置，用文本中的空间意图引导 attention 偏向对应的空间区域。
+**核心思路**：模拟人类"逐个看、然后串联"的空间推理过程。人类看"苹果和香蕉哪个离杯子远"时，会依次聚焦苹果、香蕉、杯子的位置，存入工作记忆，最后比较。本方案在 ViT 的隐空间中实现这个迭代过程。
 
-```
-传统：attention_score = Q_text @ K_visual.T / sqrt(d)
-本方案：attention_score = Q_text @ K_visual.T / sqrt(d) + λ * spatial_bias
-```
+- ViT 只跑一次，产出 patch features（frozen after encoding）
+- 一组**可学习的 latent tokens**（K=8）在隐空间中迭代推理（N=4 轮）：
+  - **Cross-Attn to Text** → 自主学习"接下来该关注什么"（不需要显式实体解析）
+  - **Cross-Attn to Patches** → 从图像对应区域读取视觉信息
+  - **Self-Attn** → 整合多轮积累的空间信息
+- Latent tokens 有状态，每轮携带前轮记忆，逐步积累空间理解
+- **不依赖具体实体名称**，学到的是"怎么根据文本分步地看图"这个通用能力
+- 所有迭代共享权重（类 RNN 展开），用 iteration embedding 区分第几轮
 
-- **SpatialIntentExtractor**：用可学习 query 从文本序列中聚合空间意图（方向、距离、关系等）
-- **PositionIntentMatcher**：将空间意图与 patch 的归一化 2D 坐标匹配，生成每个 patch 的空间偏置
-- 可学习的 `spatial_bias_scale` 控制偏置强度
+**与方案 C 传统版（Spatial-Aware Cross Attention）的区别**：
+- 传统版：单次 cross-attention + spatial bias → 浅层空间匹配
+- Latent Reasoning Loop：多轮迭代 + 记忆积累 → 深层空间推理
+
+**LLM 输入序列**：`[visual_tokens (729) | reasoning_tokens (8) | text_tokens (T)]`
 
 ## 项目结构
 
@@ -88,7 +94,9 @@ vlm/
 │   │   ├── spatial_rope/
 │   │   │   └── spatial_2d_rope.py            # 方案 B：Spatial2DRoPE + HybridPositionEmbedding
 │   │   ├── spatial_cross_attention/
-│   │   │   └── spatial_cross_attention.py    # 方案 C：SpatialIntentExtractor + PositionIntentMatcher + SpatialAwareCrossAttention
+│   │   │   └── spatial_cross_attention.py    # 方案 C 传统版（已被 Latent Reasoning Loop 替代）
+│   │   ├── latent_reasoning/
+│   │   │   └── latent_reasoning_loop.py      # 方案 C：ReasoningBlock + LatentReasoningLoop
 │   │   └── spatial_vlm/
 │   │       └── spatial_vlm.py                # 整合模型：SpatialVLM
 │   ├── data/                                 # 数据加载与预处理
@@ -119,8 +127,9 @@ Input Image + Text Query
        │                     │
        ▼                     ▼
 ┌─────────────────────────────────────┐
-│ 方案 C: Spatial-Aware Cross Attn    │ ── 从文本提取空间意图
-│ attention += λ * spatial_bias       │    引导 attend 对应空间区域
+│ 方案 C: Latent Reasoning Loop       │ ── latent tokens 迭代推理
+│ cross-attn(text) → cross-attn(img) │    4 轮迭代，逐步积累
+│ → self-attn → FFN (×4 iterations)  │    空间关系信息
 └──────────────────┬──────────────────┘
                    │
                    ▼
