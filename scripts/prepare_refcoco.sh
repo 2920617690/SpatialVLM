@@ -28,10 +28,17 @@ LOCAL_DATA_ROOT="$LOCAL_ROOT/refcoco"
 mkdir -p "$LOCAL_DATA_ROOT/images"
 mkdir -p "$NFS_DATA_ROOT"
 
+# HuggingFace 镜像加速（阿里内网）
+export HF_ENDPOINT="https://hf-mirror.com"
+export HUGGINGFACE_HUB_ENDPOINT="https://hf-mirror.com"
+export HF_HOME="/root/storage/hf_cache"
+mkdir -p "$HF_HOME"
+
 echo "============================================"
 echo "  存储路径说明"
 echo "  本地临时: $LOCAL_DATA_ROOT"
 echo "  NFS 持久: $NFS_DATA_ROOT"
+echo "  HF 镜像:  $HF_ENDPOINT"
 echo "============================================"
 
 # 安装依赖
