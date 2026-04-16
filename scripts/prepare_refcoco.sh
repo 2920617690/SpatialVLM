@@ -17,8 +17,6 @@
 # ├── refs(unc).p          # RefCOCO referring expressions
 # └── text_features.pt     # 预计算的文本特征（由 precompute_text_features.py 生成）
 
-set -e
-
 # NFS 持久化路径（训练时读取）
 NFS_ROOT="/primus_datasets/external_data/edu/mllm/fwk/vlm"
 NFS_DATA_ROOT="$NFS_ROOT/refcoco"
