@@ -12,6 +12,12 @@
 2. **Projector 阶段**：逐 patch 独立投影（MLP），patch 间的空间关系未被显式编码
 3. **LLM 解码阶段**：1D RoPE 只编码序列位置，无法区分"水平相邻"和"垂直相邻"的 patch；cross attention 在 attend 视觉特征时不考虑空间位置
 
+ViT 原论文（Dosovitskiy et al., 2020）自身也指出了这一设计上的先天不足：
+
+> *"The two-dimensional neighborhood structure is used very sparingly: in the beginning of the model by cutting the image into patches and at fine-tuning time for adjusting the position embeddings for images of different resolution. Other than that, the position embeddings at initialization time carry no information about the 2D positions of the patches and **all spatial relations between the patches have to be learned from scratch**."*
+
+也就是说，ViT 的 self-attention 虽然是 global 的（每个 patch 都能看到其他 patch），但它 **几乎没有 2D 空间归纳偏置**——位置编码在初始化时不携带任何 2D 位置信息，空间关系完全依赖数据从头学习。这与 CNN 天然编码局部性和 2D 邻域结构形成了鲜明对比，也从根本上解释了为什么 ViT 的 self-attention 学不好空间关系。
+
 ### 现有方法的局限
 
 - **Spatial-SSRL (2025)**：设计 5 个空间预训练任务，平均仅提升 4.63%
@@ -20,9 +26,13 @@
 
 这些方法都在试图通过 **更多/更好的训练信号** 来让现有架构学到空间理解，但效果有限，说明 **"更多训练信号"路线的边际收益在递减**。问题不在训练信号，而在架构本身。
 
-### 核心洞察
+### 核心洞察：Encode-then-Retrieve vs. Query-driven Encoding
 
-人类看图像是 **"带着意图去看"** 的 —— 是 attention-driven 的主动感知。当问题是"桌子左边是什么？"时，人会主动将注意力聚焦到图像左侧区域。而现有 VLM 的 ViT 在编码时完全不知道要关注什么，是被动的、无差别的编码。
+现有 VLM 的视觉编码范式是 **"先编码，再检索"（Encode-then-Retrieve）**：ViT 先将所有视觉信息无差别地编码成 token 序列，然后 LLM 再从这些 token 中去找与问题相关的信息。这个先后顺序是问题的关键——**视觉编码发生在文本理解之前，编码时完全不知道下游要问什么问题**。
+
+而人类看图像是 **"带着意图去看"** 的。当问题是"桌子左边是什么？"时，人会根据文本意图直接将注意力聚焦到图像左侧区域，而不是先把整张图记住再去里面找。这是一种 **"查询驱动的编码"（Query-driven Encoding）**——根据文本注意力直接去图像中找到对应的视觉信息。
+
+**我们的核心改变就是颠倒这个先后顺序**：不再是"先编码所有视觉信息 → 再用文本检索"，而是"根据文本意图 → 直接引导视觉编码关注相关区域"。
 
 参考 **ViLT** 将文本和图像一起输入做联合编码的思路，结合对 VLM pipeline 各环节的针对性改进，本项目从 **架构层面** 提出三个互补的机制。
 
