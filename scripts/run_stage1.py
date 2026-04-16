@@ -40,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="阶段 1: VLM 对齐预训练")
 
     # 数据
-    parser.add_argument("--data_root", type=str, default="data/llava_instruct", help="数据根目录")
+    parser.add_argument("--data_root", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/llava_instruct", help="数据根目录")
     parser.add_argument("--annotation", type=str, default=None,
                         help="标注文件路径，默认 data_root/llava_instruct_150k.json")
     parser.add_argument("--data_format", type=str, default="llava", choices=["llava", "spatial_qa"])
@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
 
     # 输出
-    parser.add_argument("--output_dir", type=str, default="checkpoints/stage1")
+    parser.add_argument("--output_dir", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/checkpoints/stage1")
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=1)
 

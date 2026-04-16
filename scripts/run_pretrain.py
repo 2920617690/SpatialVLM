@@ -40,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="阶段 0: Text-Conditioned Latent Prediction 预训练")
 
     # 数据
-    parser.add_argument("--data_root", type=str, default="data/refcoco", help="RefCOCO 数据根目录")
+    parser.add_argument("--data_root", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/refcoco", help="RefCOCO 数据根目录")
     parser.add_argument("--precomputed_text_features", type=str, default=None,
                         help="预计算文本特征路径，默认 data_root/text_features.pt")
     parser.add_argument("--num_workers", type=int, default=8, help="DataLoader workers")
@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument("--random_prob", type=float, default=0.25, help="随机掩码概率")
 
     # 输出
-    parser.add_argument("--output_dir", type=str, default="checkpoints/pretrain", help="输出目录")
+    parser.add_argument("--output_dir", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/checkpoints/pretrain", help="输出目录")
     parser.add_argument("--save_every", type=int, default=1, help="每 N 个 epoch 保存一次")
     parser.add_argument("--log_every", type=int, default=50, help="每 N 步打印一次 log")
 

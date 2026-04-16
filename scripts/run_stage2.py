@@ -39,7 +39,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="阶段 2: 全量微调")
 
     # 数据
-    parser.add_argument("--data_root", type=str, default="data/spatial_qa", help="空间推理数据根目录")
+    parser.add_argument("--data_root", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/spatial_qa", help="空间推理数据根目录")
     parser.add_argument("--annotation", type=str, default=None, help="空间推理标注文件")
     parser.add_argument("--general_data_root", type=str, default=None, help="通用 VQA 数据根目录（防遗忘）")
     parser.add_argument("--general_annotation", type=str, default=None, help="通用 VQA 标注文件")
@@ -69,7 +69,7 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
 
     # 输出
-    parser.add_argument("--output_dir", type=str, default="checkpoints/stage2")
+    parser.add_argument("--output_dir", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/checkpoints/stage2")
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=1)
 
