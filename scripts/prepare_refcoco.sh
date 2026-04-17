@@ -200,57 +200,116 @@ else:
     print(f"COCO images 已存在于 NFS ({nfs_images_dir})，跳过下载")
 
 # ---- Step 2: 下载 RefCOCO annotations ----
+# 由于原始 pickle 文件在 HuggingFace 上不可用，
+# 改用 datasets 库加载 RefCOCO 数据集，然后转换为我们需要的格式
 refs_path = os.path.join(NFS_DATA_ROOT, "refs(unc).p")
 if not os.path.exists(refs_path):
     print("\n" + "=" * 50)
-    print("  下载 RefCOCO Annotations (via HuggingFace)")
+    print("  下载 RefCOCO Annotations (via HuggingFace datasets)")
     print("=" * 50)
 
     import shutil
     local_refs = os.path.join(LOCAL_DATA_ROOT, "refs(unc).p")
 
     try:
-        from huggingface_hub import hf_hub_download
+        from datasets import load_dataset
 
-        # 尝试从 HuggingFace 下载 RefCOCO
-        hf_sources = [
-            ("lichengunc/refer", "refcoco/refs(unc).p", "dataset"),
-            ("jxu124/refcoco", "refs(unc).p", "dataset"),
+        # 尝试多个可用的 RefCOCO 数据源
+        refcoco_repos = [
+            "lmms-lab/RefCOCO",
+            "sled-umich/RefCOCO",
+            "jxu124/refcoco",
         ]
 
-        downloaded = False
-        for repo_id, filename, repo_type in hf_sources:
+        ref_dataset = None
+        for repo_id in refcoco_repos:
             try:
-                print(f"尝试从 {repo_id} 下载 {filename}...")
-                path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    repo_type=repo_type,
-                )
-                shutil.copy2(path, local_refs)
-                print(f"下载成功: {path}")
-                downloaded = True
+                print(f"尝试从 {repo_id} 加载 RefCOCO...")
+                ref_dataset = load_dataset(repo_id, trust_remote_code=True)
+                print(f"成功！splits: {list(ref_dataset.keys())}")
                 break
             except Exception as e:
                 print(f"  失败: {e}")
                 continue
 
-        if downloaded:
+        if ref_dataset is not None:
+            # 将 HuggingFace dataset 转换为 refs pickle 格式
+            # 格式: list of dicts, 每个 dict 包含:
+            #   ann_id, image_id, split, sentences: [{"raw": "...", "sent": "..."}]
+            refs_list = []
+            ref_id = 0
+
+            for split_name in ref_dataset.keys():
+                split_data = ref_dataset[split_name]
+                # 映射 split 名称
+                if "train" in split_name:
+                    mapped_split = "train"
+                elif "val" in split_name or "validation" in split_name:
+                    mapped_split = "val"
+                elif "test" in split_name:
+                    mapped_split = "test"
+                else:
+                    mapped_split = split_name
+
+                for item in split_data:
+                    ref_entry = {
+                        "ref_id": ref_id,
+                        "ann_id": item.get("ann_id", item.get("id", ref_id)),
+                        "image_id": item.get("image_id", item.get("img_id", 0)),
+                        "split": mapped_split,
+                        "sentences": [],
+                    }
+
+                    # 提取 sentences（不同数据集字段名不同）
+                    if "sentences" in item and item["sentences"]:
+                        sents = item["sentences"]
+                        if isinstance(sents, list):
+                            for s in sents:
+                                if isinstance(s, dict):
+                                    ref_entry["sentences"].append({
+                                        "raw": s.get("raw", s.get("sent", "")),
+                                        "sent": s.get("sent", s.get("raw", "")),
+                                    })
+                                elif isinstance(s, str):
+                                    ref_entry["sentences"].append({"raw": s, "sent": s})
+                    elif "sentence" in item and item["sentence"]:
+                        sent = item["sentence"]
+                        if isinstance(sent, str):
+                            ref_entry["sentences"].append({"raw": sent, "sent": sent})
+                    elif "caption" in item and item["caption"]:
+                        cap = item["caption"]
+                        if isinstance(cap, str):
+                            ref_entry["sentences"].append({"raw": cap, "sent": cap})
+                    elif "expression" in item and item["expression"]:
+                        expr = item["expression"]
+                        if isinstance(expr, str):
+                            ref_entry["sentences"].append({"raw": expr, "sent": expr})
+
+                    # 提取 bbox（如果有）
+                    if "bbox" in item and item["bbox"]:
+                        ref_entry["bbox"] = item["bbox"]
+
+                    if ref_entry["sentences"]:
+                        refs_list.append(ref_entry)
+                        ref_id += 1
+
+            # 保存为 pickle
+            with open(local_refs, "wb") as f:
+                pickle.dump(refs_list, f)
+
+            total_sents = sum(len(r["sentences"]) for r in refs_list)
+            print(f"转换完成: {len(refs_list)} refs, {total_sents} sentences")
+
+            # 复制到 NFS
             shutil.copy2(local_refs, refs_path)
             print(f"refs(unc).p 已复制到 NFS: {refs_path}")
-
-            # 验证
-            with open(refs_path, "rb") as f:
-                refs = pickle.load(f)
-            total_sents = sum(len(r.get("sentences", [])) for r in refs)
-            print(f"RefCOCO: {len(refs)} refs, {total_sents} sentences")
         else:
-            print("⚠️ RefCOCO annotations 下载失败")
-            print("请手动下载并放到:")
+            print("⚠️ 所有 RefCOCO 数据源都失败了")
+            print("请手动下载 refs(unc).p 并放到:")
             print(f"  {refs_path}")
 
     except ImportError:
-        print("⚠️ huggingface_hub 未安装，请运行: pip install huggingface_hub")
+        print("⚠️ datasets 库未安装，请运行: pip install datasets")
 else:
     print(f"\nRefCOCO annotations 已存在于 NFS，跳过下载")
 
@@ -263,16 +322,26 @@ echo "  Step 4: 预计算文本特征"
 echo "============================================"
 
 if [ ! -f "$NFS_DATA_ROOT/text_features.pt" ]; then
-    echo "运行文本特征预计算脚本..."
-    echo "（需要 GPU，首次运行会下载 SigLIP text encoder）"
-    # 先输出到本地，再复制到 NFS
-    python3 scripts/precompute_text_features.py \
-        --data_root "$NFS_DATA_ROOT" \
-        --output "$LOCAL_DATA_ROOT/text_features.pt" \
-        --batch_size 256
-    echo "复制到 NFS..."
-    cp "$LOCAL_DATA_ROOT/text_features.pt" "$NFS_DATA_ROOT/text_features.pt"
-    echo "文本特征预计算完成"
+    # 先检查 refs 文件是否存在
+    if [ -f "$NFS_DATA_ROOT/refs(unc).p" ] || [ -f "$NFS_DATA_ROOT/refs.p" ] || [ -f "$NFS_DATA_ROOT/refs(google).p" ]; then
+        echo "运行文本特征预计算脚本..."
+        echo "（需要 GPU，首次运行会下载 SigLIP text encoder）"
+        # 先输出到本地，再复制到 NFS
+        python3 scripts/precompute_text_features.py \
+            --data_root "$NFS_DATA_ROOT" \
+            --output "$LOCAL_DATA_ROOT/text_features.pt" \
+            --batch_size 256
+        if [ -f "$LOCAL_DATA_ROOT/text_features.pt" ]; then
+            echo "复制到 NFS..."
+            cp "$LOCAL_DATA_ROOT/text_features.pt" "$NFS_DATA_ROOT/text_features.pt"
+            echo "文本特征预计算完成"
+        else
+            echo "⚠️ 文本特征预计算失败，请检查错误信息"
+        fi
+    else
+        echo "⚠️ 跳过文本特征预计算：refs 文件不存在"
+        echo "请先确保 RefCOCO annotations 下载成功"
+    fi
 else
     echo "文本特征已存在于 NFS，跳过预计算"
 fi
