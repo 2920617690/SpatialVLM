@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--output", type=str, required=True, help="输出 .pt 文件路径")
     parser.add_argument("--model_name", type=str, default="google/siglip-so400m-patch14-384",
                         help="SigLIP 模型名称")
-    parser.add_argument("--max_length", type=int, default=77, help="文本最大长度")
+    parser.add_argument("--max_length", type=int, default=64, help="文本最大长度（SigLIP SO400M max_position_embeddings=64）")
     parser.add_argument("--batch_size", type=int, default=256, help="批大小")
     parser.add_argument("--device", type=str, default="auto", help="设备 (auto/cuda/cpu)")
     args = parser.parse_args()

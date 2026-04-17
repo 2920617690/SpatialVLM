@@ -148,7 +148,7 @@ def main():
         split="train",
         data_format="refcoco",
         image_size=384,
-        max_text_length=77,
+        max_text_length=64,
         precomputed_text_features=args.precomputed_text_features,
         spatial_filter=True,
         augment=True,

@@ -50,7 +50,7 @@ class SpatialPretrainDataset(Dataset):
         split: str = "train",
         data_format: str = "refcoco",
         image_size: int = 384,
-        max_text_length: int = 77,
+        max_text_length: int = 64,
         precomputed_text_features: Optional[str] = None,
         spatial_filter: bool = True,
         augment: bool = True,

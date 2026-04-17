@@ -153,5 +153,5 @@ pretraining:
     data_root: "/primus_datasets/external_data/edu/mllm/fwk/vlm/refcoco"
     precomputed_text_features: "/primus_datasets/external_data/edu/mllm/fwk/vlm/refcoco/text_features.pt"
     spatial_filter: true
-    max_text_length: 77
+    max_text_length: 64
     num_workers: 8
