@@ -1,11 +1,11 @@
 """
-阶段 1：VLM 对齐预训练
+阶段 1：VLM 对齐预训练（Qwen3.5-4B 适配版）
 
-冻结 ViT backbone 和 LLM，只训练新增模块：
-- TextContextEncoder + KVInjectionHeads（方案 A，可从阶段 0 加载预训练权重）
-- HybridPositionEmbedding（方案 B）
-- LatentReasoningLoop（方案 C）
-- Visual Projector（MLP）
+基于 Qwen3.5-4B 原生多模态模型，冻结 ViT 和 LLM，只训练新增的空间增强模块：
+- TextConditionedViTKV（方案 A：KV Injection，可从阶段 0 加载预训练权重）
+- LatentReasoningLoop（方案 C：隐空间迭代推理）
+
+方案 B（2D RoPE）不需要额外实现，Qwen3.5 已自带 mrope。
 
 数据：LLaVA-Instruct-150K 或类似的 image-text 对齐数据
 
@@ -37,24 +37,25 @@ from src.data.sft_dataset import SFTDataset, sft_collate_fn
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="阶段 1: VLM 对齐预训练")
+    parser = argparse.ArgumentParser(description="阶段 1: VLM 对齐预训练（Qwen3.5-4B）")
 
     # 数据
-    parser.add_argument("--data_root", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/llava_instruct", help="数据根目录")
+    parser.add_argument("--data_root", type=str,
+                        default="/primus_datasets/external_data/edu/mllm/fwk/vlm/llava_instruct",
+                        help="数据根目录")
     parser.add_argument("--annotation", type=str, default=None,
                         help="标注文件路径，默认 data_root/llava_instruct_150k.json")
     parser.add_argument("--data_format", type=str, default="llava", choices=["llava", "spatial_qa"])
     parser.add_argument("--num_workers", type=int, default=8)
 
     # 模型
-    parser.add_argument("--vit_name", type=str, default="google/siglip-so400m-patch14-384")
-    parser.add_argument("--llm_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen3.5-4B",
+                        help="Qwen3.5 模型名称或本地路径")
     parser.add_argument("--pretrain_weights", type=str, default=None,
                         help="阶段 0 预训练的 KV Injection 权重路径")
 
     # 方案开关
     parser.add_argument("--enable_kv_injection", action="store_true", default=True)
-    parser.add_argument("--enable_spatial_rope", action="store_true", default=True)
     parser.add_argument("--enable_latent_reasoning", action="store_true", default=True)
 
     # 训练
@@ -69,7 +70,8 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
 
     # 输出
-    parser.add_argument("--output_dir", type=str, default="/primus_datasets/external_data/edu/mllm/fwk/vlm/checkpoints/stage1")
+    parser.add_argument("--output_dir", type=str,
+                        default="/primus_datasets/external_data/edu/mllm/fwk/vlm/checkpoints/stage1")
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--save_every", type=int, default=1)
 
@@ -78,12 +80,6 @@ def parse_args():
     parser.add_argument("--resume", type=str, default=None)
 
     return parser.parse_args()
-
-
-def freeze_module(module: nn.Module) -> None:
-    """冻结模块的所有参数。"""
-    for param in module.parameters():
-        param.requires_grad = False
 
 
 def count_parameters(model: nn.Module) -> dict:
@@ -107,6 +103,7 @@ def main():
     args = parse_args()
 
     # 配置文件
+    config = {}
     if args.config and os.path.exists(args.config):
         with open(args.config) as f:
             config = yaml.safe_load(f)
@@ -117,6 +114,10 @@ def main():
             args.batch_size = stage1_config["batch_size"]
         if args.learning_rate == 1e-3 and "learning_rate" in stage1_config:
             args.learning_rate = stage1_config["learning_rate"]
+        # 从配置文件读取模型名
+        model_config = config.get("model", {})
+        if "base_model" in model_config and args.model_name == "Qwen/Qwen3.5-4B":
+            args.model_name = model_config["base_model"]
 
     if args.annotation is None:
         args.annotation = os.path.join(args.data_root, "llava_instruct_150k.json")
@@ -124,100 +125,83 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"设备: {device}")
 
-    # ---- 加载模型组件 ----
-    print("\n加载模型组件...")
+    # ---- 加载 Qwen3.5 基座模型 ----
+    print(f"\n加载 Qwen3.5 基座模型: {args.model_name}")
+    from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    # ViT
-    from transformers import SiglipVisionModel
-    vit_encoder = SiglipVisionModel.from_pretrained(args.vit_name)
-    visual_dim = vit_encoder.config.hidden_size
-    vit_num_heads = vit_encoder.config.num_attention_heads
-
-    # LLM
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    print(f"加载 LLM: {args.llm_name}")
-    tokenizer = AutoTokenizer.from_pretrained(args.llm_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    llm_decoder = AutoModelForCausalLM.from_pretrained(
-        args.llm_name,
+    base_model = AutoModelForImageTextToText.from_pretrained(
+        args.model_name,
         torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation="flash_attention_2",
     )
-    llm_dim = llm_decoder.config.hidden_size
-    llm_num_heads = llm_decoder.config.num_attention_heads
+    processor = AutoProcessor.from_pretrained(args.model_name)
 
-    # Text encoder: 使用 LLM 本身作为 text encoder
-    text_encoder = llm_decoder.model  # LLaMA 的 transformer body
+    # ---- 读取模型维度参数 ----
+    model_cfg = config.get("model", {})
+    vit_cfg = model_cfg.get("vit", {})
+    llm_cfg = model_cfg.get("llm", {})
+    kv_cfg = model_cfg.get("text_conditioned_vit", {})
+    reasoning_cfg = model_cfg.get("latent_reasoning_loop", {})
+
+    visual_dim = vit_cfg.get("visual_dim", 1024)
+    text_dim = kv_cfg.get("text_dim", llm_cfg.get("llm_dim", 2560))
+    vit_num_heads = vit_cfg.get("num_heads", 16)
+    context_dim = kv_cfg.get("context_dim", 256)
 
     # ---- 构建 SpatialVLM ----
     print("\n构建 SpatialVLM...")
-    image_size = vit_encoder.config.image_size
-    patch_size = vit_encoder.config.patch_size
-    grid_size = image_size // patch_size
-
     model = SpatialVLM(
-        vit_encoder=vit_encoder,
-        llm_decoder=llm_decoder,
-        text_encoder=text_encoder,
-        visual_dim=visual_dim,
-        text_dim=llm_dim,
-        llm_dim=llm_dim,
-        num_heads=llm_num_heads,
-        grid_height=grid_size,
-        grid_width=grid_size,
+        base_model=base_model,
         enable_text_conditioned_vit=args.enable_kv_injection,
-        enable_spatial_rope=args.enable_spatial_rope,
-        enable_spatial_cross_attention=False,
         enable_latent_reasoning_loop=args.enable_latent_reasoning,
-        scheme_a_mode="kv_injection",
-        context_dim=256,
+        # 方案 A 参数
+        text_dim=text_dim,
+        context_dim=context_dim,
+        injection_layers=kv_cfg.get("injection_layers"),
+        vit_num_heads=vit_num_heads,
+        # 方案 C 参数
+        visual_dim=visual_dim,
+        latent_dim=reasoning_cfg.get("latent_dim", 512),
+        num_latent_tokens=reasoning_cfg.get("num_latent_tokens", 8),
+        num_iterations=reasoning_cfg.get("num_iterations", 4),
+        reasoning_num_heads=reasoning_cfg.get("num_heads", 8),
+        reasoning_output_dim=reasoning_cfg.get("output_dim", text_dim),
+        share_reasoning_weights=reasoning_cfg.get("share_weights", True),
     )
 
     # 加载阶段 0 预训练权重
     if args.pretrain_weights and os.path.exists(args.pretrain_weights):
         print(f"\n加载预训练 KV Injection 权重: {args.pretrain_weights}")
-        from src.training.pretrain_spatial import load_pretrained_kv_injection
-        load_pretrained_kv_injection(model, args.pretrain_weights, strict=False)
+        pretrain_state = torch.load(args.pretrain_weights, map_location="cpu")
+        pretrain_dict = pretrain_state.get("model_state_dict", pretrain_state)
+        missing, unexpected = model.load_state_dict(pretrain_dict, strict=False)
+        print(f"  Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
 
     # ---- 冻结策略 ----
     print("\n设置冻结策略...")
 
-    # 冻结 ViT backbone（KV Injection heads 保持可训练）
-    if hasattr(model.visual_encoder, "vit_encoder"):
-        freeze_module(model.visual_encoder.vit_encoder)
-        print("  ViT backbone: 冻结")
-    else:
-        freeze_module(model.visual_encoder)
-        print("  ViT: 冻结")
+    # 冻结 ViT 和 LLM
+    model.freeze_vision()
+    print("  ViT backbone: 冻结")
+    model.freeze_llm()
+    print("  LLM + lm_head: 冻结")
 
-    # 冻结 LLM
-    freeze_module(model.llm_decoder)
-    print("  LLM decoder: 冻结")
-
-    # 冻结 text encoder
-    freeze_module(model.text_encoder)
-    print("  Text encoder: 冻结")
-
-    # 可训练模块列表
+    # 确保新增模块可训练
     trainable_modules = []
-    if args.enable_kv_injection and hasattr(model.visual_encoder, "text_context_encoder"):
-        trainable_modules.append(("TextContextEncoder", model.visual_encoder.text_context_encoder))
-        trainable_modules.append(("KVInjectionHeads", model.visual_encoder.kv_injection_heads))
-    if args.enable_latent_reasoning and hasattr(model, "latent_reasoning_loop"):
-        trainable_modules.append(("LatentReasoningLoop", model.latent_reasoning_loop))
-    if args.enable_spatial_rope and hasattr(model, "hybrid_position_embedding"):
-        trainable_modules.append(("HybridPositionEmbedding", model.hybrid_position_embedding))
-    trainable_modules.append(("VisualProjector", model.visual_projector))
-    if hasattr(model, "text_projector") and not isinstance(model.text_projector, nn.Identity):
-        trainable_modules.append(("TextProjector", model.text_projector))
-
-    for name, module in trainable_modules:
-        for param in module.parameters():
+    if args.enable_kv_injection and hasattr(model, "text_conditioned_vit"):
+        for param in model.text_conditioned_vit.parameters():
             param.requires_grad = True
-        param_count = sum(p.numel() for p in module.parameters())
-        print(f"  {name}: 可训练 ({param_count / 1e6:.2f}M)")
+        param_count = sum(p.numel() for p in model.text_conditioned_vit.parameters())
+        trainable_modules.append(("TextConditionedViTKV", param_count))
+
+    if args.enable_latent_reasoning and hasattr(model, "latent_reasoning_loop"):
+        for param in model.latent_reasoning_loop.parameters():
+            param.requires_grad = True
+        param_count = sum(p.numel() for p in model.latent_reasoning_loop.parameters())
+        trainable_modules.append(("LatentReasoningLoop", param_count))
+
+    for name, count in trainable_modules:
+        print(f"  {name}: 可训练 ({count / 1e6:.2f}M)")
 
     params = count_parameters(model)
     print(f"\n参数统计:")
@@ -227,18 +211,12 @@ def main():
 
     model = model.to(device)
 
-    # Patch LLM RoPE（方案 B）
-    if args.enable_spatial_rope:
-        model.patch_llm_with_spatial_rope()
-        print("  已 patch LLM RoPE → HybridPositionEmbedding")
-
     # ---- 数据集 ----
     print(f"\n构建数据集: {args.annotation}")
     train_dataset = SFTDataset(
         data_root=args.data_root,
         annotation_file=args.annotation,
-        tokenizer=tokenizer,
-        image_size=image_size,
+        processor=processor,
         max_length=args.max_length,
         data_format=args.data_format,
     )
@@ -283,7 +261,7 @@ def main():
 
     # ---- 训练循环 ----
     print(f"\n{'='*60}")
-    print(f"  阶段 1：VLM 对齐预训练")
+    print(f"  阶段 1：VLM 对齐预训练（Qwen3.5-4B）")
     print(f"  Epochs: {args.epochs}")
     print(f"  Batch size: {args.batch_size} × {args.gradient_accumulation_steps} (accum)")
     print(f"  Effective batch size: {args.batch_size * args.gradient_accumulation_steps}")
@@ -301,18 +279,24 @@ def main():
         optimizer.zero_grad()
 
         for step, batch in enumerate(train_loader):
-            pixel_values = batch["pixel_values"].to(device)
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             attention_mask = batch["attention_mask"].to(device)
 
+            forward_kwargs = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+            }
+
+            # 图像相关字段
+            if "pixel_values" in batch:
+                forward_kwargs["pixel_values"] = batch["pixel_values"].to(device)
+            if "image_grid_thw" in batch:
+                forward_kwargs["image_grid_thw"] = batch["image_grid_thw"].to(device)
+
             with autocast(enabled=args.use_amp):
-                outputs = model(
-                    pixel_values=pixel_values,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                )
+                outputs = model(**forward_kwargs)
                 loss = outputs["loss"] / args.gradient_accumulation_steps
 
             scaler.scale(loss).backward()

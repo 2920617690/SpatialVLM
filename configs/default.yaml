@@ -1,58 +1,54 @@
 # Spatial VLM 默认配置
+# 基于 Qwen3.5-4B（原生多模态）改造
 
 model:
-  # 视觉编码器
-  vit:
-    name: "google/siglip-so400m-patch14-384"
-    image_size: 384
-    patch_size: 14
-    visual_dim: 1152
+  # 基座模型：Qwen3.5-4B（原生多模态，自带 ViT + LLM + 投影）
+  base_model: "Qwen/Qwen3.5-4B"
 
-  # LLM
+  # 视觉编码器（Qwen3.5 自带）
+  vit:
+    visual_dim: 1024             # ViT hidden_size
+    out_hidden_size: 2560        # ViT → LLM 投影输出维度
+    patch_size: 16
+    depth: 24                    # ViT 层数
+    num_heads: 16                # ViT attention heads
+    spatial_merge_size: 2        # 空间合并（2x2 patches → 1 token）
+
+  # LLM（Qwen3.5 自带）
   llm:
-    name: "meta-llama/Llama-3.1-8B-Instruct"
-    llm_dim: 4096
-    num_heads: 32
+    llm_dim: 2560               # LLM hidden_size
+    num_heads: 16               # LLM attention heads
+    num_kv_heads: 4             # GQA key-value heads
+    head_dim: 256
+    num_layers: 32
+    # 混合注意力：linear_attention x3 + full_attention，共 8 组
+    # mrope: interleaved=true, section=[11,11,10]
 
   # 方案开关
-  enable_text_conditioned_vit: true
-  enable_spatial_rope: true
-  enable_spatial_cross_attention: false     # 被 Latent Reasoning Loop 替代
-  enable_latent_reasoning_loop: true       # 隐空间迭代推理（替代方案 C）
+  enable_text_conditioned_vit: true      # 方案 A：文本引导的视觉编码
+  enable_spatial_rope: false             # 方案 B：Qwen3.5 已自带 mrope，不需要额外改
+  enable_latent_reasoning_loop: true     # 方案 C：隐空间迭代推理
 
   # Text-Conditioned ViT (方案 A)
   text_conditioned_vit:
-    mode: "kv_injection"       # "kv_injection" (DFlash 风格) 或 "cross_attention" (传统)
-    injection_layers: null     # null 表示所有层注入；可指定如 [9, 18] 只注入特定层
-    context_dim: 256           # KV injection 模式：文本 context 压缩维度
-    num_heads: 16              # ViT attention head 数量（SigLIP SO400M = 16）
-    dropout: 0.1
+    mode: "kv_injection"       # DFlash 风格 KV injection
+    injection_layers: null     # null 表示所有 24 层注入
+    context_dim: 256           # 文本 context 压缩维度
+    text_dim: 2560             # 文本特征维度（= LLM hidden_size）
+    num_heads: 16              # ViT attention heads
 
-  # Spatial 2D RoPE (方案 B)
-  spatial_rope:
-    max_grid_size: 32
-    base: 10000.0
-
-  # Spatial-Aware Cross Attention (方案 C，已被 Latent Reasoning Loop 替代)
-  spatial_cross_attention:
-    spatial_intent_dim: 64
-    num_heads: 8
-    dropout: 0.1
-
-  # Latent Reasoning Loop（替代方案 C）
+  # Latent Reasoning Loop（方案 C）
   latent_reasoning_loop:
+    visual_dim: 1024             # ViT 输出维度
+    text_dim: 2560               # LLM hidden_size
     latent_dim: 512              # 隐空间维度（瓶颈）
     num_latent_tokens: 8         # latent tokens 数量
     num_iterations: 4            # 迭代轮数
     num_heads: 8                 # attention heads
     mlp_ratio: 4.0
     dropout: 0.1
+    output_dim: 2560             # 输出维度（= LLM hidden_size）
     share_weights: true          # 所有迭代共享同一个 ReasoningBlock
-
-  # 视觉投影器
-  projector:
-    type: "mlp"
-    hidden_dim: 4096
 
 training:
   # 阶段 1：对齐预训练（冻结 ViT 和 LLM，只训练新增模块）

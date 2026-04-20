@@ -1,5 +1,5 @@
 """
-Text-Conditioned ViT with KV Injection（方案 A v2）
+Text-Conditioned ViT with KV Injection（方案 A v2）— Qwen3.5 适配版
 
 灵感来源：DFlash（2602.06036）在 decoder 中通过 KV injection 注入 target model 的
 context feature，实现持续、不稀释的条件化。
@@ -8,27 +8,24 @@ context feature，实现持续、不稀释的条件化。
 直接注入为额外的 K/V entries。Visual patch queries 可以直接 attend 到文本 KV，
 实现"第三人称"式引导——文本块不独立理解图像，只作为引导器持续提供空间意图条件。
 
-与 v1（cross-attention + gate）的区别：
-- v1 在 2 个注入点添加 additive spatial bias，信号在层间被稀释
-- v2 在每层 attention 的 KV 中 concatenate 文本 entries，信号持续且直接
-
-与 DFlash 的类比：
-- DFlash：target LLM hidden features → fuse → inject into drafter's KV cache
-- 本模块：text encoder features → compress → inject into ViT's KV cache
+Qwen3.5 ViT 适配要点：
+- Qwen3.5 ViT 使用合并的 qkv 投影（不是分开的 q_proj/k_proj/v_proj）
+- 输入是 2D packed format (seq_len, hidden_size)，不是 (batch, seq_len, hidden_size)
+- 使用 cu_seqlens 做 variable-length packing
+- 有 rotary_pos_emb 应用在 Q/K 上
+- Attention forward 签名: (hidden_states, cu_seqlens, rotary_pos_emb, position_embeddings)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List, Tuple, Dict
-import types
+from typing import Optional, List, Tuple, Dict, Callable
 
 
 class TextContextEncoder(nn.Module):
     """将文本 embeddings 压缩为紧凑的 context feature。
 
-    类比 DFlash 中从 target model 多层 hidden states 融合为 compact context feature 的过程。
-    这里将高维文本 embeddings (4096) 压缩为低维 context (256)，所有 ViT 层共享同一份 context。
+    将高维文本 embeddings (2560) 压缩为低维 context (256)，所有 ViT 层共享同一份 context。
     """
 
     def __init__(self, text_dim: int, context_dim: int = 256):
@@ -43,9 +40,9 @@ class TextContextEncoder(nn.Module):
     def forward(self, text_tokens: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            text_tokens: (B, T, text_dim)
+            text_tokens: (B, T, text_dim) 或 (total_T, text_dim)
         Returns:
-            context: (B, T, context_dim)
+            context: same shape with last dim = context_dim
         """
         return self.encoder(text_tokens)
 
@@ -65,8 +62,7 @@ class KVInjectionHead(nn.Module):
         self.k_proj = nn.Linear(context_dim, visual_dim)
         self.v_proj = nn.Linear(context_dim, visual_dim)
 
-        # Per-head gate: (1, num_heads, 1, 1)，初始化为 0
-        # 训练时通过 tanh 激活，范围 [-1, 1]
+        # Per-head gate 初始化为 0 → tanh(0) = 0 → 初始时不影响原始 ViT
         self.gate = nn.Parameter(torch.zeros(1, num_heads, 1, 1))
 
     def forward(
@@ -74,10 +70,10 @@ class KVInjectionHead(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            context: (B, T, context_dim)
+            context: (total_T, context_dim) packed text context
         Returns:
-            k: (B, T, visual_dim)
-            v: (B, T, visual_dim)
+            k: (total_T, visual_dim)
+            v: (total_T, visual_dim)
             gate: (1, num_heads, 1, 1) 经 tanh 激活的 gate 值
         """
         k = self.k_proj(context)
@@ -87,43 +83,43 @@ class KVInjectionHead(nn.Module):
 
 
 class TextConditionedViTKV(nn.Module):
-    """DFlash 风格 KV Injection 的 Text-Conditioned ViT。
+    """DFlash 风格 KV Injection 的 Text-Conditioned ViT — 适配 Qwen3.5。
 
-    通过 monkey-patch SigLIP attention 层的 forward，在每层（或指定层）
+    通过 monkey-patch Qwen3_5VisionAttention 的 forward，在每层（或指定层）
     将文本 context feature 投影为额外的 K/V entries 并 concatenate 到视觉 K/V 上。
 
-    使用方式：
-    1. 加载预训练 ViT（SigLIP）
-    2. 创建本模块（自动 monkey-patch attention 层）
-    3. forward 时传入 pixel_values + text_tokens
-    4. 输出与原始 ViT 形状完全一致
+    Qwen3.5 ViT 特点：
+    - 合并的 qkv 投影: self.qkv = nn.Linear(dim, dim*3)
+    - 2D packed format: 输入 (seq_len, dim)，用 cu_seqlens 区分不同图像
+    - Rotary position embedding 应用在 Q/K 上
     """
 
     def __init__(
         self,
-        vit_encoder: nn.Module,
-        text_dim: int = 4096,
+        vision_model: nn.Module,
+        text_dim: int = 2560,
         context_dim: int = 256,
         injection_layers: Optional[List[int]] = None,
         num_heads: int = 16,
     ):
         """
         Args:
-            vit_encoder: 预训练 SigLIP ViT
-            text_dim: 文本编码器输出维度
+            vision_model: Qwen3_5VisionModel 实例
+            text_dim: 文本特征维度（= LLM hidden_size = 2560）
             context_dim: 压缩后的 context 维度
-            injection_layers: 注入哪些层，None 表示所有层
-            num_heads: ViT attention head 数量
+            injection_layers: 注入哪些层，None 表示所有 24 层
+            num_heads: ViT attention head 数量（Qwen3.5 = 16）
         """
         super().__init__()
-        self.vit_encoder = vit_encoder
+        self.vision_model = vision_model
 
-        # 获取 ViT 结构信息
-        self.vit_layers = self._get_vit_layers()
-        num_layers = len(self.vit_layers)
-        visual_dim = self._get_visual_dim()
+        # Qwen3.5 ViT 的 blocks
+        self.vit_blocks = vision_model.blocks
+        num_layers = len(self.vit_blocks)
+        visual_dim = self.vit_blocks[0].attn.dim
         self.visual_dim = visual_dim
         self.num_heads = num_heads
+        self.head_dim = visual_dim // num_heads
 
         # 确定注入层：默认所有层
         if injection_layers is None:
@@ -142,263 +138,218 @@ class TextConditionedViTKV(nn.Module):
         )
 
         # Holder dict：forward 时存入 text context，monkey-patched attention 读取
-        self._text_context_holder: Dict[str, torch.Tensor] = {}
+        self._injection_context: Dict[str, object] = {}
 
         # Monkey-patch attention 层
-        self._original_forwards: Dict[int, callable] = {}
+        self._original_forwards: Dict[int, Callable] = {}
         self._patch_attention_layers()
 
-    def _get_vit_layers(self) -> nn.ModuleList:
-        """提取 ViT encoder layers，兼容 SigLIP 结构。"""
-        # SigLIP: encoder.layers
-        if hasattr(self.vit_encoder, "encoder") and hasattr(
-            self.vit_encoder.encoder, "layers"
-        ):
-            return self.vit_encoder.encoder.layers
-        # timm 风格: blocks
-        if hasattr(self.vit_encoder, "blocks"):
-            return self.vit_encoder.blocks
-        # 直接 layers
-        if hasattr(self.vit_encoder, "layers"):
-            return self.vit_encoder.layers
-        raise ValueError(
-            "Cannot find transformer layers in ViT encoder. "
-            "Expected: 'encoder.layers', 'blocks', or 'layers'"
-        )
-
-    def _get_visual_dim(self) -> int:
-        """获取 ViT 隐藏维度。"""
-        first_layer = self.vit_layers[0]
-        # SigLIP: layer_norm1
-        if hasattr(first_layer, "layer_norm1"):
-            return first_layer.layer_norm1.normalized_shape[0]
-        # timm: norm1
-        if hasattr(first_layer, "norm1"):
-            return first_layer.norm1.normalized_shape[0]
-        if hasattr(first_layer, "ln_1"):
-            return first_layer.ln_1.normalized_shape[0]
-        raise ValueError("Cannot determine visual dim from ViT layers")
-
     def _patch_attention_layers(self) -> None:
-        """Monkey-patch SigLIP attention layers 以支持 KV injection。"""
+        """Monkey-patch Qwen3_5VisionAttention 的 forward 以支持 KV injection。"""
         for layer_idx in self.injection_layer_indices:
-            layer = self.vit_layers[layer_idx]
-            attn = layer.self_attn
+            block = self.vit_blocks[layer_idx]
+            attn = block.attn
             kv_head = self.kv_injection_heads[str(layer_idx)]
 
-            # 保存原始 forward
             self._original_forwards[layer_idx] = attn.forward
-
-            # 创建 patched forward
-            patched_forward = self._create_patched_forward(attn, kv_head)
-            attn.forward = patched_forward
+            attn.forward = self._create_patched_forward(attn, kv_head)
 
     def _create_patched_forward(
         self, original_attn: nn.Module, kv_head: KVInjectionHead
-    ):
-        """创建一个 patched attention forward，支持 KV injection。
+    ) -> Callable:
+        """创建 patched Qwen3_5VisionAttention forward。
 
-        当 holder 中有 text_context 时，将文本 KV concatenate 到视觉 KV 上。
-        当 holder 为空时，退化为标准 self-attention。
+        Qwen3.5 ViT attention 的原始 forward 流程：
+        1. qkv = self.qkv(hidden_states)  → (seq_len, dim*3)
+        2. reshape + split → Q, K, V 各 (seq_len, num_heads, head_dim)
+        3. apply rotary_pos_emb to Q, K
+        4. reshape → (1, num_heads, seq_len, head_dim)
+        5. attention (per-chunk via cu_seqlens 或 flash attention)
+        6. proj output
+
+        Patched 版本在 step 3 之后、step 4 之前，将 text KV concat 到视觉 KV 上。
+        由于 cu_seqlens 的存在，需要按 chunk 分别处理。
         """
-        holder = self._text_context_holder
+        holder = self._injection_context
         num_heads = self.num_heads
-        head_dim = self.visual_dim // num_heads
+        head_dim = self.head_dim
 
         def patched_forward(
             hidden_states: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
+            cu_seqlens: torch.Tensor,
+            rotary_pos_emb: torch.Tensor | None = None,
+            position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
             **kwargs,
-        ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-            B, N, D = hidden_states.shape
-
-            # 计算视觉 Q/K/V
-            queries = original_attn.q_proj(hidden_states)
-            keys = original_attn.k_proj(hidden_states)
-            values = original_attn.v_proj(hidden_states)
-
+        ) -> torch.Tensor:
             text_context = holder.get("text_context")
+            text_cu_seqlens = holder.get("text_cu_seqlens")
 
-            if text_context is not None:
-                T = text_context.shape[1]
-
-                # 投影文本 context 为 K/V
-                k_text, v_text, gate = kv_head(text_context)
-
-                # Reshape to multi-head: (B, heads, seq, head_dim)
-                queries = queries.view(B, N, num_heads, head_dim).transpose(1, 2)
-                keys = keys.view(B, N, num_heads, head_dim).transpose(1, 2)
-                values = values.view(B, N, num_heads, head_dim).transpose(1, 2)
-                k_text = k_text.view(B, T, num_heads, head_dim).transpose(1, 2)
-                v_text = v_text.view(B, T, num_heads, head_dim).transpose(1, 2)
-
-                # Gate text KV
-                k_text = gate * k_text
-                v_text = gate * v_text
-
-                # Concatenate: [visual_KV | text_KV]
-                keys = torch.cat([keys, k_text], dim=2)  # (B, heads, N+T, head_dim)
-                values = torch.cat([values, v_text], dim=2)
-
-                # 构建扩展的 attention mask
-                extended_mask = None
-                if attention_mask is not None:
-                    # 原始 mask: (B, 1, N, N) 或 (B, heads, N, N)
-                    # 扩展为 (B, 1, N, N+T)：text 部分全部可 attend
-                    text_mask = torch.zeros(
-                        B, 1, N, T, dtype=attention_mask.dtype, device=attention_mask.device
-                    )
-                    extended_mask = torch.cat([attention_mask, text_mask], dim=-1)
-
-                # 处理文本 padding mask
-                text_padding_mask = holder.get("text_padding_mask")
-                if text_padding_mask is not None:
-                    # text_padding_mask: (B, T)，True 表示 padding
-                    # 转为 attention mask 格式: padding 位置设为 -inf
-                    padding_bias = text_padding_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
-                    padding_bias = padding_bias.expand(-1, -1, N, -1)  # (B, 1, N, T)
-                    padding_bias = padding_bias.float().masked_fill(padding_bias.bool(), float("-inf"))
-
-                    if extended_mask is not None:
-                        # 已有视觉 mask，只修改 text 部分
-                        extended_mask = torch.cat(
-                            [extended_mask[:, :, :, :N], extended_mask[:, :, :, N:] + padding_bias],
-                            dim=-1,
-                        )
-                    else:
-                        # 没有视觉 mask，创建新的: 视觉部分全 0 + text padding
-                        visual_part = torch.zeros(
-                            B, 1, N, N, dtype=padding_bias.dtype, device=padding_bias.device
-                        )
-                        extended_mask = torch.cat([visual_part, padding_bias], dim=-1)
-
-                # Scaled dot-product attention（PyTorch 2.0+，天然支持 Q/KV 不同长度）
-                attn_output = F.scaled_dot_product_attention(
-                    queries,
-                    keys,
-                    values,
-                    attn_mask=extended_mask,
-                    dropout_p=original_attn.dropout if original_attn.training else 0.0,
+            # 如果没有 text context，直接调用原始 forward
+            if text_context is None:
+                return original_attn.forward(
+                    hidden_states, cu_seqlens, rotary_pos_emb,
+                    position_embeddings=position_embeddings, **kwargs,
                 )
 
-                # Reshape back: (B, heads, N, head_dim) → (B, N, D)
-                attn_output = attn_output.transpose(1, 2).reshape(B, N, D).contiguous()
+            seq_length = hidden_states.shape[0]
+
+            # Step 1-2: QKV 投影 + split
+            qkv = original_attn.qkv(hidden_states)
+            query_states, key_states, value_states = (
+                qkv.reshape(seq_length, 3, num_heads, head_dim)
+                .permute(1, 0, 2, 3)
+                .unbind(0)
+            )
+            # 各自 shape: (seq_len, num_heads, head_dim)
+
+            # Step 3: 应用 rotary position embedding
+            if position_embeddings is not None:
+                from transformers.models.qwen3_5.modeling_qwen3_5 import (
+                    apply_rotary_pos_emb_vision,
+                )
+                cos, sin = position_embeddings
+                query_states, key_states = apply_rotary_pos_emb_vision(
+                    query_states, key_states, cos, sin
+                )
+
+            # Step 4: 投影 text context 为 K/V
+            k_text, v_text, gate = kv_head(text_context)
+            # k_text, v_text: (total_T, visual_dim)
+            k_text = k_text.view(-1, num_heads, head_dim)  # (total_T, heads, head_dim)
+            v_text = v_text.view(-1, num_heads, head_dim)
+
+            # Step 5: 按 cu_seqlens 分 chunk，每个 chunk 独立做 attention
+            visual_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            num_chunks = len(visual_lengths)
+
+            # text 的 cu_seqlens
+            if text_cu_seqlens is not None:
+                text_lengths = (text_cu_seqlens[1:] - text_cu_seqlens[:-1]).tolist()
             else:
-                # 无文本 context → 标准 self-attention
-                queries = queries.view(B, N, num_heads, head_dim).transpose(1, 2)
-                keys = keys.view(B, N, num_heads, head_dim).transpose(1, 2)
-                values = values.view(B, N, num_heads, head_dim).transpose(1, 2)
+                # 均分 text tokens 给每个 chunk，余数分配给最后一个 chunk
+                total_text = text_context.shape[0]
+                text_per_chunk = total_text // max(num_chunks, 1)
+                remainder = total_text - text_per_chunk * num_chunks
+                text_lengths = [text_per_chunk] * num_chunks
+                if remainder > 0 and num_chunks > 0:
+                    text_lengths[-1] += remainder
 
-                attn_output = F.scaled_dot_product_attention(
-                    queries,
-                    keys,
-                    values,
-                    attn_mask=attention_mask,
-                    dropout_p=original_attn.dropout if original_attn.training else 0.0,
+            # Split visual Q/K/V by chunks
+            visual_q_chunks = torch.split(query_states, visual_lengths, dim=0)
+            visual_k_chunks = torch.split(key_states, visual_lengths, dim=0)
+            visual_v_chunks = torch.split(value_states, visual_lengths, dim=0)
+
+            # Split text K/V by chunks
+            text_k_chunks = torch.split(k_text, text_lengths, dim=0)
+            text_v_chunks = torch.split(v_text, text_lengths, dim=0)
+
+            attn_outputs = []
+            # gate: (1, num_heads, 1, 1) → (1, num_heads, 1) for broadcasting with (T_i, num_heads, head_dim)
+            gate_broadcast = gate.squeeze(0).squeeze(-1).unsqueeze(0)  # (1, num_heads, 1)
+
+            for chunk_idx in range(num_chunks):
+                chunk_q = visual_q_chunks[chunk_idx]   # (N_i, heads, head_dim)
+                chunk_k = visual_k_chunks[chunk_idx]
+                chunk_v = visual_v_chunks[chunk_idx]
+                chunk_k_text = text_k_chunks[chunk_idx]  # (T_i, heads, head_dim)
+                chunk_v_text = text_v_chunks[chunk_idx]
+
+                # Gate text KV: broadcast (1, num_heads, 1) * (T_i, num_heads, head_dim)
+                chunk_k_text = gate_broadcast * chunk_k_text
+                chunk_v_text = gate_broadcast * chunk_v_text
+
+                # Concat: [visual_KV | text_KV]
+                combined_k = torch.cat([chunk_k, chunk_k_text], dim=0)
+                combined_v = torch.cat([chunk_v, chunk_v_text], dim=0)
+
+                # Reshape for attention: (1, heads, seq, head_dim)
+                n_vis = chunk_q.shape[0]
+                n_total = combined_k.shape[0]
+
+                chunk_q = chunk_q.transpose(0, 1).unsqueeze(0)  # (1, heads, N_i, hd)
+                combined_k = combined_k.transpose(0, 1).unsqueeze(0)  # (1, heads, N_i+T_i, hd)
+                combined_v = combined_v.transpose(0, 1).unsqueeze(0)
+
+                # Scaled dot-product attention
+                chunk_out = F.scaled_dot_product_attention(
+                    chunk_q, combined_k, combined_v,
+                    attn_mask=None,
+                    dropout_p=0.0 if not original_attn.training else original_attn.attention_dropout,
+                    is_causal=False,
                 )
-                attn_output = attn_output.transpose(1, 2).reshape(B, N, D).contiguous()
+                # (1, heads, N_i, head_dim) → (N_i, heads, head_dim) → (N_i, dim)
+                chunk_out = chunk_out.squeeze(0).transpose(0, 1)
+                attn_outputs.append(chunk_out)
 
-            attn_output = original_attn.out_proj(attn_output)
-            return attn_output, None
+            # Concat all chunks back
+            attn_output = torch.cat(attn_outputs, dim=0)  # (seq_len, heads, head_dim)
+            attn_output = attn_output.reshape(seq_length, -1).contiguous()
+
+            # Output projection
+            attn_output = original_attn.proj(attn_output)
+            return attn_output
 
         return patched_forward
 
     def restore_attention_layers(self) -> None:
         """恢复所有 patched attention 层的原始 forward。"""
         for layer_idx, original_forward in self._original_forwards.items():
-            layer = self.vit_layers[layer_idx]
-            layer.self_attn.forward = original_forward
+            block = self.vit_blocks[layer_idx]
+            block.attn.forward = original_forward
         self._original_forwards.clear()
 
-    def forward(
+    def set_text_context(
         self,
-        pixel_values: torch.Tensor,
-        text_tokens: torch.Tensor,
+        text_features: torch.Tensor,
         text_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
+        text_cu_seqlens: Optional[torch.Tensor] = None,
+    ) -> None:
+        """设置文本 context，供 monkey-patched attention 层读取。
+
         Args:
-            pixel_values: (B, C, H, W) 输入图像
-            text_tokens: (B, T, text_dim) 文本编码器输出
-            text_padding_mask: (B, T) True 表示 padding 位置
-
-        Returns:
-            visual_features: (B, num_patches, visual_dim)
+            text_features: (B, T, text_dim) 文本特征
+            text_padding_mask: (B, T) True = padding
+            text_cu_seqlens: (num_chunks+1,) 文本的 cumulative sequence lengths
         """
-        # 1. 编码文本为 compact context（一次性，所有层共享）
-        text_context = self.text_context_encoder(text_tokens)
+        batch_size = text_features.shape[0]
 
-        # 对 padding 位置置零，避免其影响 KV 投影
+        # 编码为 compact context
+        text_context = self.text_context_encoder(text_features)  # (B, T, context_dim)
+
+        # 对 padding 位置置零
         if text_padding_mask is not None:
             text_context = text_context.masked_fill(
                 text_padding_mask.unsqueeze(-1), 0.0
             )
 
-        # 2. 存入 holder（monkey-patched attention 层会读取）
-        self._text_context_holder["text_context"] = text_context
-        self._text_context_holder["text_padding_mask"] = text_padding_mask
-
-        try:
-            # 3. 正常调用 ViT forward（内部 attention 已被 patch）
-            visual_outputs = self.vit_encoder(pixel_values)
-
-            # 兼容不同 ViT 输出格式
-            if hasattr(visual_outputs, "last_hidden_state"):
-                hidden_states = visual_outputs.last_hidden_state
-            elif isinstance(visual_outputs, torch.Tensor):
-                hidden_states = visual_outputs
-            else:
-                hidden_states = visual_outputs[0]
-        finally:
-            # 确保 holder 被清空，避免状态泄漏
-            self._text_context_holder.clear()
-
-        return hidden_states
-
-    def forward_from_embeddings(
-        self,
-        patch_embeddings: torch.Tensor,
-        text_tokens: torch.Tensor,
-        text_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """从预计算的 patch embeddings 开始 forward（跳过 patch embed 层）。
-
-        用于预训练时在 embedding 级别做 masking：先获取 patch embeddings，
-        替换被遮挡位置为 mask token，再送入 ViT transformer 层。
-
-        Args:
-            patch_embeddings: (B, N, visual_dim) 已处理的 patch embeddings
-            text_tokens: (B, T, text_dim) 文本编码器输出
-            text_padding_mask: (B, T) True 表示 padding 位置
-
-        Returns:
-            visual_features: (B, N, visual_dim)
-        """
-        # 编码文本为 compact context
-        text_context = self.text_context_encoder(text_tokens)
+        # Pack 成 2D format: (total_T, context_dim)
         if text_padding_mask is not None:
-            text_context = text_context.masked_fill(
-                text_padding_mask.unsqueeze(-1), 0.0
+            # 去掉 padding tokens，只保留有效 tokens
+            valid_tokens = []
+            lengths = []
+            for b in range(batch_size):
+                valid_mask = ~text_padding_mask[b]
+                valid_tokens.append(text_context[b][valid_mask])
+                lengths.append(valid_mask.sum().item())
+            packed_context = torch.cat(valid_tokens, dim=0)
+            # 构建 text cu_seqlens
+            text_cu_seqlens = torch.zeros(
+                batch_size + 1, dtype=torch.int32, device=text_features.device
+            )
+            for b in range(batch_size):
+                text_cu_seqlens[b + 1] = text_cu_seqlens[b] + lengths[b]
+        else:
+            # 无 padding，直接 flatten
+            packed_context = text_context.reshape(-1, text_context.shape[-1])
+            seq_len = text_features.shape[1]
+            text_cu_seqlens = torch.arange(
+                0, (batch_size + 1) * seq_len, seq_len,
+                dtype=torch.int32, device=text_features.device,
             )
 
-        # 存入 holder
-        self._text_context_holder["text_context"] = text_context
-        self._text_context_holder["text_padding_mask"] = text_padding_mask
+        self._injection_context["text_context"] = packed_context
+        self._injection_context["text_cu_seqlens"] = text_cu_seqlens
 
-        try:
-            hidden_states = patch_embeddings
-            for layer in self.vit_layers:
-                # SigLIP encoder layer 返回 tensor（不是 tuple）
-                layer_output = layer(hidden_states, attention_mask=None)
-                if isinstance(layer_output, tuple):
-                    hidden_states = layer_output[0]
-                else:
-                    hidden_states = layer_output
-
-            # 应用 post-layernorm（如果存在）
-            if hasattr(self.vit_encoder, "post_layernorm"):
-                hidden_states = self.vit_encoder.post_layernorm(hidden_states)
-        finally:
-            self._text_context_holder.clear()
-
-        return hidden_states
+    def clear_text_context(self) -> None:
+        """清空文本 context，避免状态泄漏。"""
+        self._injection_context.clear()
