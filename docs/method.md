@@ -1,236 +1,231 @@
-# AVV: Answer, Visual Evidence, Verify
+# AVV: Self-Verification Policy Learning for VLMs
 
-## 1. Problem Setup
+## 1. Setting
 
-Given an image `x` and a question `q`, standard VLMs directly model:
+We consider the standard VLM setting:
 
 ```text
-p(y | x, q)
+image -> ViT -> projector -> decoder-only LLM -> answer
 ```
 
-where `y` is the answer text. This objective is underconstrained for spatial reasoning. It rewards the model for producing the correct answer, but does not require the model to preserve or check the visual evidence that justifies the answer.
+The central claim of this project is that many spatial errors do not come from missing model capacity alone. They come from **premature commitment**. The model proposes an answer before it has verified whether the underlying visual claim is actually supported by the image.
 
-We instead treat spatial QA as a hypothesis verification problem. The model first proposes an answer `y0`, then gathers localized evidence and verifies whether that evidence supports the implied spatial claim before emitting a final answer `y*`.
+Instead of redesigning the whole architecture, we keep the original `ViT + projector + decoder` backbone and change the problem from one-shot answering to multi-step self-verification.
 
 ## 2. Core Hypothesis
 
-Spatial failures often arise because the model commits too early:
+For spatial questions, the model should not only answer. It should learn a policy that decides:
 
-- it binds the wrong instance
-- it reads the wrong local region
-- it compresses the wrong visual detail into language
-- it never visually checks its own claim
+1. when to propose a draft answer
+2. when to verify that draft
+3. whether to revise the draft after verification
+4. when to stop and commit
 
-The main intervention is therefore small but structural:
+This is better viewed as a sequential decision problem than as a single supervised mapping.
 
-**do not answer directly; answer only after a visual verification step.**
+## 3. Why This Is Not Just Prompt Engineering
 
-## 3. Overview
+If we only ask the same VLM to "think twice" at inference time, the method is just prompt engineering.
 
-AVV has five stages:
+It becomes a real method only when the model is trained to perform three distinct behaviors:
 
-1. `Proposal`: produce an initial answer `y0`
-2. `Evidence Query`: derive a compact query `z0` describing what evidence would justify `y0`
-3. `Evidence Localization`: predict evidence regions for object `A` and object `B`
-4. `Re-Perception`: crop those regions from the original image and re-encode them at higher fidelity
-5. `Verification`: decide whether the re-read evidence supports, contradicts, or is insufficient for the proposed claim
+1. `draft mode`: produce a draft answer or claim
+2. `verify mode`: judge whether the draft is supported by the image
+3. `final mode`: produce the final answer after incorporating the verification result
 
-The final decision head combines the proposal confidence and verification output to produce `y*`.
+These are not just different prompts. They are different supervised or reinforced behaviors over shared model parameters.
 
-## 4. Architecture
+## 4. Shared-Backbone Formulation
 
-### 4.1 Backbone
+We intentionally avoid assuming new permanent modules. The preferred formulation reuses the same VLM across multiple passes.
 
-The backbone encodes:
+### 4.1 Draft Pass
 
-- image tokens `V = {v_i} for i = 1...N`
-- question representation `q_h`
-
-The framework does not assume a specific VLM family. The only requirement is access to image features and a question-conditioned context vector.
-
-### 4.2 Proposal Head
-
-The proposal head produces:
+Given image `x` and question `q`, the decoder produces:
 
 ```text
-p_theta(y0 | x, q)
+y0 = draft answer
+c0 = draft claim
 ```
 
-and an evidence query vector:
+Example:
 
 ```text
-z0 = f_evidence(V, q_h, y0)
+Question: Is the cat to the left of the dog?
+Draft: answer = yes, claim = cat left of dog
 ```
 
-`z0` is not a full chain-of-thought. It is a compact latent descriptor of what the model believes should be checked next.
+### 4.2 Verify Pass
 
-### 4.3 Evidence Pointer
-
-The pointer head predicts evidence regions:
+The same VLM is then called again in verification mode:
 
 ```text
-bA, bB = f_ptr(V, q_h, z0)
+input: image x + claim c0
+output: v0 in {support, contradict, insufficient}
 ```
 
-where `bA` and `bB` are boxes or heatmaps corresponding to the two object regions that matter for the spatial claim.
+This is deliberately a narrow output space. The goal is to reduce shortcut freedom and force a hard judgment.
 
-### 4.4 Re-Perception Module
+### 4.3 Final Pass
 
-The key difference from latent-only reasoning is that AVV returns to pixels:
+The model is called one more time:
 
 ```text
-xA_hat = crop(x, bA)
-xB_hat = crop(x, bB)
+input: image x + question q + draft y0/c0 + verification result v0
+output: final answer y*
 ```
 
-These crops are re-encoded to obtain evidence features:
+The final answer may preserve, revise, or reject the initial draft.
+
+## 5. RL Formulation
+
+We model self-verification as a partially observable sequential decision process.
+
+### 5.1 State
+
+The policy state at step `t` contains:
+
+- image `x`
+- question `q`
+- current draft answer `y_t`
+- current claim `c_t`
+- verification history `h_t`
+- remaining computation budget `B_t`
+
+The state is not the full world state. It is the model's current belief and interaction history.
+
+### 5.2 Action Space
+
+We use a small discrete action space:
 
 ```text
-fA = g(xA_hat)
-fB = g(xB_hat)
+PROPOSE
+VERIFY
+REVISE
+ANSWER
+ABSTAIN
 ```
 
-This step is meant to correct first-pass errors caused by patch boundaries, coarse readout, or wrong instance binding.
+Possible future refinements may add actions such as region-specific reinspection, but the minimal formulation should start with high-level control actions.
 
-### 4.5 Hypothesis Builder
+### 5.3 Transition
 
-The pair `(q, y0)` is converted into a structured claim:
+Each action triggers another pass through the same VLM in a different mode:
+
+- `PROPOSE`: create or update a draft claim
+- `VERIFY`: check whether the current claim is supported
+- `REVISE`: rewrite the claim or answer after contradiction
+- `ANSWER`: terminate and emit final answer
+- `ABSTAIN`: terminate without committing to a risky answer
+
+### 5.4 Reward
+
+A practical reward should combine correctness and efficiency.
 
 ```text
-c = h(q, y0)
+R =
+  final answer reward
+  + verification consistency reward
+  - unnecessary verification cost
+  - contradiction-ignored penalty
 ```
 
-Examples:
+A simple version is:
 
-- `Is the cat left of the dog?` + `yes` -> `cat left of dog`
-- `Is the apple farther than the banana from the cup?` + `no` -> `apple is not farther than banana from cup`
+- correct final answer: `+1.0`
+- correct verification label: `+0.2`
+- each extra verification step: `-0.05`
+- answering despite contradiction: `-0.3`
+- abstention when truly ambiguous: small positive reward
 
-### 4.6 Relation Verifier
+The exact coefficients are secondary. The principle is that verification should help, but endless checking should be discouraged.
 
-The verifier predicts:
+## 6. Training Pipeline
+
+Pure RL from scratch is not the right starting point. The recommended pipeline has three stages.
+
+### Stage 0: Supervised Warm Start
+
+Train the shared VLM on three supervised formats:
+
+#### Draft Mode
 
 ```text
-p_theta(v | fA, fB, c)
+input: image + question
+target: draft answer + draft claim
 ```
 
-where:
+#### Verify Mode
 
 ```text
-v in {support, contradict, insufficient}
+input: image + claim
+target: support / contradict / insufficient
 ```
 
-The verifier is deliberately discriminative rather than generative. It should answer one narrow question: does the localized evidence support the proposed claim?
-
-### 4.7 Final Decision Head
-
-The final answer is computed from proposal confidence and verification state:
+#### Final Mode
 
 ```text
-p_theta(y* | y0, v, q_h)
+input: image + question + draft + verification
+target: final answer
 ```
 
-In the simplest case:
-
-- keep `y0` if `v = support`
-- flip or revise if `v = contradict`
-- abstain or trigger fallback if `v = insufficient`
-
-## 5. Training Objective
-
-The total objective is:
+Loss:
 
 ```text
-L =
-  L_ans
+L_sft =
+  L_draft
+  + lambda_verify * L_verify
   + lambda_final * L_final
-  + lambda_ptr * L_ptr
-  + lambda_ver * L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
 ```
 
-### 5.1 Proposal Loss
+### Stage 1: Oracle-Guided Imitation
+
+Use synthetic data or box-derived relations to construct good trajectories:
+
+- if the relation is obvious, answer directly
+- if the relation is hard or counterfactual, verify first
+- if verification contradicts the draft, revise
+- then answer
+
+This stage teaches the policy a reasonable initial control flow before RL.
+
+### Stage 2: RL Fine-tuning
+
+Run policy optimization over multi-step episodes.
+
+The objective is no longer just token imitation. It is expected return:
 
 ```text
-L_ans = CE(p_theta(y0 | x, q), y)
+J(pi) = E_pi [ sum_t gamma^t r_t ]
 ```
 
-### 5.2 Final Answer Loss
+The exact algorithm is flexible. PPO-style fine-tuning is a natural starting point, but the method does not depend on one specific optimizer.
+
+## 7. Data Construction
+
+The warm-start and imitation stages still require structured supervision.
+
+Each sample should be promoted from:
 
 ```text
-L_final = CE(p_theta(y* | x, q), y)
+(image, question, answer)
 ```
 
-### 5.3 Pointer Loss
-
-For box supervision:
+to:
 
 ```text
-L_ptr =
-  L1(bA, bA*)
-  + L1(bB, bB*)
-  + GIoU(bA, bA*)
-  + GIoU(bB, bB*)
+(image, question, claim, verify_label, final_answer)
 ```
-
-For heatmap supervision, BCE can replace the box losses.
-
-### 5.4 Verifier Loss
-
-```text
-L_ver = CE(p_theta(v | fA, fB, c), v*)
-```
-
-### 5.5 Counterfactual Loss
-
-For the same evidence pair, construct an incorrect relation claim `c_tilde` and require contradiction:
-
-```text
-L_cf = -log p_theta(v = contradict | fA, fB, c_tilde)
-```
-
-This discourages shortcut learning from object co-occurrence alone.
-
-### 5.6 Consistency Loss
-
-For a geometric transform `g` and the corresponding language transform `T_g`, require equivariant verification:
-
-```text
-L_cons =
-  D(
-    p_theta(v | g(x), T_g(q)),
-    T_g(p_theta(v | x, q))
-  )
-```
-
-In practice, the first transform to use is horizontal flip with `left <-> right`.
-
-## 6. Training Sample Construction
-
-Each sample is promoted from `(image, question, answer)` to:
-
-```text
-(x, A, B, r, q, y, bA*, bB*)
-```
-
-where:
-
-- `A, B` are object instances
-- `r` is a geometric relation
-- `bA*, bB*` are evidence boxes
-
-### 6.1 Data Sources
 
 Primary sources:
 
 - COCO instances
 - Visual Genome
 - RefCOCO / RefCOCOg
-- CLEVR or synthetic relation data
+- CLEVR
+- synthetic grid, chart, table, or GUI tasks
 
-### 6.2 Relation Labels
-
-Initial relation vocabulary:
+For bbox-based datasets, relation labels can be programmatically derived:
 
 - `left_of`
 - `right_of`
@@ -238,76 +233,54 @@ Initial relation vocabulary:
 - `below`
 - `overlap`
 - `inside`
-- `intersect`
 - `larger_than`
 - `smaller_than`
 
-Distance and depth relations should be delayed until the pipeline is stable.
+This data is especially useful for training verify-mode and for imitation trajectories.
 
-### 6.3 Positive and Negative Questions
+## 8. Why RL Helps
 
-For each valid object pair `(A, B)`:
+Supervised learning is good at teaching:
 
-- positive question: `Is A left of B?`
-- negative question: `Is A right of B?`
+- what a valid draft looks like
+- what a valid verification label looks like
+- how to verbalize the final answer
 
-Hard negatives are built by:
+RL is useful for what supervision does not naturally solve:
 
-- swapping nearby same-class instances
-- substituting confusable relations
-- degrading one crop to create `insufficient` cases
+- when verification is necessary
+- how often to verify
+- when to revise
+- when to stop
 
-## 7. Stage-wise Training
+So RL should not replace the whole VLM training recipe. It should focus on **verification policy learning**.
 
-### Stage 1: Pointer Pretraining
+## 9. Main Risk
 
-Train only evidence localization:
+If verification is judged only by the model itself, reward hacking becomes likely.
 
-```text
-L_stage1 = L_ptr
-```
+The model may learn to:
 
-### Stage 2: Verifier Pretraining
+- invent a draft
+- invent a matching verification label
+- remain self-consistent without becoming visually faithful
 
-Use GT crops and train only verification:
+Therefore, early training and reward design should rely as much as possible on external truth:
 
-```text
-L_stage2 =
-  L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
-```
+- synthetic geometry
+- box-derived relations
+- deterministic flip consistency
+- programmatic relation checkers
 
-### Stage 3: Joint Fine-tuning
-
-Connect the full loop:
-
-```text
-L_stage3 =
-  L_ans
-  + lambda_final * L_final
-  + lambda_ptr * L_ptr
-  + lambda_ver * L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
-```
-
-## 8. Why This Is Different
-
-AVV does not assume the model needs deeper latent iteration by default. It assumes a simpler failure mode:
-
-- the answer was proposed before the relevant visual detail was checked
-
-This makes the intervention smaller than redesigning the entire encoder-decoder stack, but more targeted than adding generic reasoning tokens.
-
-## 9. Practical Ablations
+## 10. Practical Ablations
 
 The first ablations that matter are:
 
-1. no re-perception, verifier runs on first-pass features only
-2. no verifier, direct answer from proposal
-3. no counterfactual training
-4. no consistency loss
-5. GT evidence boxes vs predicted evidence boxes
+1. one-shot answer only
+2. draft + final without verify mode
+3. supervised multi-pass without RL
+4. RL with no verification cost
+5. RL with no contradiction penalty
+6. GT relation labels vs noisy relation labels
 
-These ablations test whether the gains come from actual visual verification rather than extra parameters.
+These ablations test whether gains come from true policy learning rather than just longer prompting.

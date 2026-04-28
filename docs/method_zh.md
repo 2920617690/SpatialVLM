@@ -1,236 +1,232 @@
-# AVV: 回答, 视觉证据, 验证
+# AVV: 面向 VLM 的自验证策略学习
 
-## 1. 问题定义
+## 1. 基本设定
 
-给定图像 `x` 和问题 `q`，标准 VLM 通常直接建模：
+我们讨论的仍然是标准 VLM 范式：
 
 ```text
-p(y | x, q)
+image -> ViT -> projector -> decoder-only LLM -> answer
 ```
 
-其中 `y` 是答案文本。这个目标对空间推理来说约束太弱。它只奖励模型答对，却不要求模型保留、读取或核对支撑答案的视觉证据。
+这个项目的核心判断是：很多空间错误并不只是因为模型能力不够，而是因为模型**过早提交答案**。它在真正验证视觉命题之前，就已经把答案说出来了。
 
-我们把空间问答改写为一个“命题验证”问题。模型先提出一个初始答案 `y0`，再收集局部证据，判断这些证据是否真的支持该答案隐含的空间命题，最后输出最终答案 `y*`。
+因此，我们不优先重构整个架构，而是尽量保留原始的 `ViT + projector + decoder`，把问题从“一次性回答”改写成“多步自验证”。
 
 ## 2. 核心假设
 
-空间错误往往来自于模型过早提交答案：
+对于空间问题，模型不应该只学会回答，还应该学会一个策略：
 
-- 绑定错了实例
-- 读错了局部区域
-- 把错误的视觉细节压缩成了语言
-- 从来没有回头检查自己的结论
+1. 什么时候先给出草案
+2. 什么时候需要验证草案
+3. 验证之后是否应该改写草案
+4. 什么时候应该停止并提交最终答案
 
-因此，最重要的干预不是“继续直接回答”，而是：
+这件事更像顺序决策，而不是单步监督映射。
 
-**先回答，再基于视觉证据做一次验证。**
+## 3. 为什么这不只是提示词工程
 
-## 3. 总体流程
+如果我们只是在推理时让同一个 VLM “多想一步”，那本质上只是 prompt engineering。
 
-AVV 有五个阶段：
+它要变成真正的方法，必须让模型在训练时学会三种不同的行为：
 
-1. `Proposal`：先产生初始答案 `y0`
-2. `Evidence Query`：生成一个紧凑的证据查询 `z0`，表示“如果这个答案是对的，我应该看什么”
-3. `Evidence Localization`：定位对象 `A` 和对象 `B` 的证据区域
-4. `Re-Perception`：从原图中裁出这些区域，并以更高保真度重新编码
-5. `Verification`：判断重新读取到的证据是支持、反驳，还是不足以判断
+1. `draft mode`：生成草案答案或命题
+2. `verify mode`：判断草案是否被图像支持
+3. `final mode`：结合验证结果，生成最终答案
 
-最后由决策头综合 proposal 置信度和 verification 结果，输出最终答案 `y*`。
+关键点不在于“提示词长什么样”，而在于共享参数的同一个模型是否被训练成会执行这三种模式。
 
-## 4. 模型结构
+## 4. 共享骨干的多步调用
 
-### 4.1 Backbone
+我们刻意不把方法写成“必须加很多新模块”的形式。更理想的版本是复用同一个 VLM，分多次调用。
 
-backbone 负责编码：
+### 4.1 草案阶段
 
-- 图像 token `V = {v_i} for i = 1...N`
-- 问题表示 `q_h`
-
-这里不强绑定某个具体的 VLM 家族，只要求我们能拿到图像特征和问题条件向量。
-
-### 4.2 Proposal Head
-
-proposal head 输出：
+给定图像 `x` 和问题 `q`，decoder 先输出：
 
 ```text
-p_theta(y0 | x, q)
-```
-
-同时输出一个证据查询向量：
-
-```text
-z0 = f_evidence(V, q_h, y0)
-```
-
-`z0` 不是完整的 chain-of-thought，而是一个紧凑的 latent，表示模型认为下一步该验证什么。
-
-### 4.3 Evidence Pointer
-
-pointer head 预测证据区域：
-
-```text
-bA, bB = f_ptr(V, q_h, z0)
-```
-
-其中 `bA`、`bB` 可以是 box，也可以是 heatmap，对应这道空间题最关键的两个对象区域。
-
-### 4.4 Re-Perception Module
-
-AVV 和单纯 latent reasoning 最大的区别是：它会回到像素。
-
-```text
-xA_hat = crop(x, bA)
-xB_hat = crop(x, bB)
-```
-
-然后重新编码，得到证据特征：
-
-```text
-fA = g(xA_hat)
-fB = g(xB_hat)
-```
-
-这一步是为了纠正第一次粗读时的 patch 边界误差、局部读错和实例绑定错误。
-
-### 4.5 Hypothesis Builder
-
-将 `(q, y0)` 组合成一个结构化命题：
-
-```text
-c = h(q, y0)
+y0 = draft answer
+c0 = draft claim
 ```
 
 例如：
 
-- `Is the cat left of the dog?` + `yes` -> `cat left of dog`
-- `Is the apple farther than the banana from the cup?` + `no` -> `apple is not farther than banana from cup`
-
-### 4.6 Relation Verifier
-
-verifier 输出：
-
 ```text
-p_theta(v | fA, fB, c)
+Question: Is the cat to the left of the dog?
+Draft: answer = yes, claim = cat left of dog
 ```
 
-其中：
+### 4.2 验证阶段
+
+然后再次调用同一个 VLM，进入 verify mode：
 
 ```text
-v in {support, contradict, insufficient}
+input: image x + claim c0
+output: v0 in {support, contradict, insufficient}
 ```
 
-它不是生成式模块，而是一个判别器。它只回答一个很窄的问题：局部证据到底支不支持当前命题。
+这里刻意把输出空间压得很小，目的就是减少模型自由发挥的 shortcut。
 
-### 4.7 Final Decision Head
+### 4.3 最终回答阶段
 
-最终答案由 proposal 和 verifier 共同决定：
+第三次调用模型：
 
 ```text
-p_theta(y* | y0, v, q_h)
+input: image x + question q + draft y0/c0 + verification result v0
+output: final answer y*
 ```
 
-最简单的策略是：
+最终答案可以保留、修改，或者拒绝初始草案。
 
-- 如果 `v = support`，保留 `y0`
-- 如果 `v = contradict`，翻转或改写 `y0`
-- 如果 `v = insufficient`，保守输出或触发回退策略
+## 5. RL 形式化
 
-## 5. 训练目标
+我们把自验证过程看成一个部分可观测的顺序决策问题。
 
-总损失写成：
+### 5.1 状态
+
+第 `t` 步的状态包含：
+
+- 图像 `x`
+- 问题 `q`
+- 当前草案答案 `y_t`
+- 当前命题 `c_t`
+- 已有验证历史 `h_t`
+- 剩余计算预算 `B_t`
+
+这里的状态不是环境真状态，而是模型当前的信念和交互历史。
+
+### 5.2 动作空间
+
+第一版建议用一个小的离散动作空间：
 
 ```text
-L =
-  L_ans
+PROPOSE
+VERIFY
+REVISE
+ANSWER
+ABSTAIN
+```
+
+后续当然可以继续细化到区域级 reinspection，但初始版本更应该从高层控制动作开始。
+
+### 5.3 状态转移
+
+每个动作都触发同一个 VLM 在不同模式下再运行一次：
+
+- `PROPOSE`：创建或更新草案命题
+- `VERIFY`：检查当前命题是否被图像支持
+- `REVISE`：在矛盾后重写命题或答案
+- `ANSWER`：终止 episode 并输出最终答案
+- `ABSTAIN`：终止 episode，但不冒险强答
+
+### 5.4 奖励设计
+
+一个实用的奖励函数应该同时考虑正确性和效率：
+
+```text
+R =
+  final answer reward
+  + verification consistency reward
+  - unnecessary verification cost
+  - contradiction-ignored penalty
+```
+
+最简单的一个版本可以是：
+
+- 最终答案正确：`+1.0`
+- 验证标签正确：`+0.2`
+- 每多做一次验证：`-0.05`
+- 明明出现矛盾还强行作答：`-0.3`
+- 在真正不确定的情况下选择 abstain：给一个小正奖励
+
+具体系数不是最关键的，原则是：
+验证应当有价值，但无止境地检查也应当受到惩罚。
+
+## 6. 训练流程
+
+不建议一上来纯 RL。从零开始太难训，也太容易学歪。更稳的路线是三阶段。
+
+### Stage 0: 监督式热启动
+
+先让共享 VLM 学会三种格式：
+
+#### Draft Mode
+
+```text
+input: image + question
+target: draft answer + draft claim
+```
+
+#### Verify Mode
+
+```text
+input: image + claim
+target: support / contradict / insufficient
+```
+
+#### Final Mode
+
+```text
+input: image + question + draft + verification
+target: final answer
+```
+
+损失可以写成：
+
+```text
+L_sft =
+  L_draft
+  + lambda_verify * L_verify
   + lambda_final * L_final
-  + lambda_ptr * L_ptr
-  + lambda_ver * L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
 ```
 
-### 5.1 Proposal Loss
+### Stage 1: Oracle 引导的模仿学习
+
+利用合成数据或 bbox 派生关系构造比较好的轨迹：
+
+- 如果关系很明显，直接回答
+- 如果关系困难或是反事实问题，先验证
+- 如果验证与草案矛盾，就改写
+- 再输出最终答案
+
+这一阶段的作用，是先教会策略一个“能工作的控制流”。
+
+### Stage 2: RL 微调
+
+最后再做策略优化。
+
+此时优化目标不再只是 token 模仿，而是期望回报：
 
 ```text
-L_ans = CE(p_theta(y0 | x, q), y)
+J(pi) = E_pi [ sum_t gamma^t r_t ]
 ```
 
-### 5.2 Final Answer Loss
+具体算法可以灵活选择。PPO 风格的微调是比较自然的起点，但方法本身不依赖某一个特定优化器。
+
+## 7. 数据构造
+
+热启动和 imitation 阶段依然需要结构化监督。
+
+每个样本应该从：
 
 ```text
-L_final = CE(p_theta(y* | x, q), y)
+(image, question, answer)
 ```
 
-### 5.3 Pointer Loss
-
-如果证据监督是 box：
+提升为：
 
 ```text
-L_ptr =
-  L1(bA, bA*)
-  + L1(bB, bB*)
-  + GIoU(bA, bA*)
-  + GIoU(bB, bB*)
+(image, question, claim, verify_label, final_answer)
 ```
 
-如果证据监督是 heatmap，也可以用 BCE 替代。
-
-### 5.4 Verifier Loss
-
-```text
-L_ver = CE(p_theta(v | fA, fB, c), v*)
-```
-
-### 5.5 Counterfactual Loss
-
-对同一对证据区域，构造一个错误命题 `c_tilde`，并要求 verifier 明确反驳：
-
-```text
-L_cf = -log p_theta(v = contradict | fA, fB, c_tilde)
-```
-
-这能减少模型仅凭对象共现关系走 shortcut。
-
-### 5.6 Consistency Loss
-
-对于几何变换 `g` 及其语言映射 `T_g`，要求验证结果满足一致性：
-
-```text
-L_cons =
-  D(
-    p_theta(v | g(x), T_g(q)),
-    T_g(p_theta(v | x, q))
-  )
-```
-
-最先做的就是水平翻转，以及 `left <-> right` 的同步替换。
-
-## 6. 训练样本构造
-
-每个样本不再只是 `(image, question, answer)`，而是：
-
-```text
-(x, A, B, r, q, y, bA*, bB*)
-```
-
-其中：
-
-- `A, B` 是对象实例
-- `r` 是几何关系
-- `bA*, bB*` 是证据框
-
-### 6.1 数据来源
-
-优先使用：
+主要数据来源：
 
 - COCO instances
 - Visual Genome
 - RefCOCO / RefCOCOg
-- CLEVR 或合成关系数据
+- CLEVR
+- 合成 grid、chart、table、GUI 数据
 
-### 6.2 关系标签
-
-第一版关系集合建议限制为：
+对于有 bbox 的数据，可以程序化地推导关系标签：
 
 - `left_of`
 - `right_of`
@@ -238,76 +234,55 @@ L_cons =
 - `below`
 - `overlap`
 - `inside`
-- `intersect`
 - `larger_than`
 - `smaller_than`
 
-距离和深度关系先放后面，等训练闭环稳定以后再加入。
+这些数据尤其适合训练 verify mode，也适合构造 imitation trajectory。
 
-### 6.3 正负样本构造
+## 8. 为什么 RL 更合适
 
-对每个有效对象对 `(A, B)`：
+监督学习擅长教会模型：
 
-- 正样本问题：`Is A left of B?`
-- 负样本问题：`Is A right of B?`
+- 什么样的草案是合法的
+- 什么样的验证标签是合法的
+- 怎样把最终结论说成自然语言
 
-难负样本可以来自：
+RL 更适合解决监督不擅长的部分：
 
-- 交换邻近的同类实例
-- 替换成容易混淆的关系
-- 故意破坏一个 crop，制造 `insufficient`
+- 什么时候必须验证
+- 应该验证多少次
+- 什么时候该改写
+- 什么时候应该停止
 
-## 7. 分阶段训练
+所以 RL 不该替代整个 VLM 训练，而应该聚焦在**自验证策略学习**上。
 
-### Stage 1: Pointer Pretraining
+## 9. 最大风险
 
-第一阶段只训练证据定位：
+如果验证结果也完全由模型自己说了算，就很容易出现 reward hacking。
 
-```text
-L_stage1 = L_ptr
-```
+模型可能学会：
 
-### Stage 2: Verifier Pretraining
+- 先编一个草案
+- 再编一个和草案自洽的 verification label
+- 最后在语言上自圆其说，却不是真的视觉忠实
 
-第二阶段用 GT crop 训练 verifier：
+因此，早期训练和奖励设计应尽量依赖外部真值：
 
-```text
-L_stage2 =
-  L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
-```
+- 合成几何任务
+- bbox 派生关系
+- 确定性的翻转一致性
+- 程序化 relation checker
 
-### Stage 3: Joint Fine-tuning
+## 10. 优先做的消融
 
-第三阶段把 proposal、pointer、re-perception 和 verifier 串起来：
+最先该做的消融包括：
 
-```text
-L_stage3 =
-  L_ans
-  + lambda_final * L_final
-  + lambda_ptr * L_ptr
-  + lambda_ver * L_ver
-  + lambda_cf * L_cf
-  + lambda_cons * L_cons
-```
+1. 只做一次性回答
+2. 只有 draft + final，没有 verify mode
+3. 多步监督，但没有 RL
+4. RL 中不惩罚额外验证步数
+5. RL 中不惩罚忽略矛盾
+6. 使用 GT relation label 与 noisy relation label 对比
 
-## 8. 这条路线的区别
-
-AVV 不默认假设问题在于“latent 迭代不够深”。它假设更直接的失败模式：
-
-- 模型在真正检查关键视觉细节之前，就已经把答案说出口了
-
-因此，它比重构整个 encoder-decoder 主干更小，但又比单纯加 reasoning token 更针对真实错误来源。
-
-## 9. 建议优先做的消融
-
-最关键的消融有这几类：
-
-1. 去掉 re-perception，只在第一次前向的特征上做 verifier
-2. 去掉 verifier，直接输出 proposal
-3. 去掉 counterfactual training
-4. 去掉 consistency loss
-5. 使用 GT evidence box 与 predicted evidence box 对比
-
-这些消融能回答一个关键问题：提升究竟来自真正的视觉验证，还是只是来自多加了参数。
+这些消融能回答一个核心问题：
+性能提升究竟来自真正的策略学习，还是仅仅来自更长的 prompting。

@@ -1,24 +1,27 @@
 # AVV: Answer, Visual Evidence, Verify
 
-This repository is rebuilt around a different hypothesis:
+This repository is now organized around a different hypothesis:
 
-**many spatial failures in VLMs come from unverified visual readout, not only weak reasoning.**
+**many spatial failures in VLMs come from committing too early, before the model has verified its own visual claim.**
 
-Instead of adding more conditioning inside the encoder, AVV inserts a lightweight verification loop after the first answer proposal:
+The current direction is no longer "add more reasoning modules." It is:
 
-1. propose an answer,
-2. point to the visual evidence,
-3. re-read that evidence at higher fidelity,
-4. verify whether the claim is supported,
-5. revise or commit the final answer.
+- keep the original `ViT + projector + decoder` VLM
+- run it as a multi-step policy instead of a one-shot answerer
+- train the policy to decide when to propose, verify, revise, and stop
 
 ## Core Idea
 
-Standard VLMs optimize `p(y | x, q)` and are rewarded for answering directly. AVV changes the problem structure:
+Standard VLMs optimize `p(y | x, q)` and are rewarded for answering directly.
+AVV changes the problem structure from:
 
-`(x, q) -> y0 -> evidence(A, B) -> re-perceive -> verify -> y*`
+`(x, q) -> y`
 
-This turns spatial QA into **hypothesis verification** rather than pure direct generation.
+to:
+
+`(x, q) -> propose -> verify -> revise or answer`
+
+This turns spatial QA into a **self-verification policy learning** problem rather than a pure direct-generation problem.
 
 ## Repository Layout
 
@@ -57,49 +60,48 @@ vlm/
 
 ```mermaid
 flowchart LR
-    A["Image x"] --> B["Backbone"]
-    Q["Question q"] --> C["Text Encoder"]
-    B --> D["Proposal Head"]
-    C --> D
-    D --> E["Initial Answer y0"]
-    D --> F["Evidence Query z0"]
-    B --> G["Evidence Pointer"]
-    C --> G
-    F --> G
-    G --> H["Region A"]
-    G --> I["Region B"]
-    A --> J["Crop & Re-encode A"]
-    A --> K["Crop & Re-encode B"]
-    H --> J
-    I --> K
-    J --> L["fA"]
-    K --> M["fB"]
-    C --> N["Hypothesis Builder"]
-    E --> N
-    N --> O["Claim c(y0,q)"]
-    L --> P["Relation Verifier"]
-    M --> P
-    O --> P
-    P --> R["support / contradict / insufficient"]
-    E --> S["Decision Head"]
-    R --> S
-    S --> T["Final Answer y*"]
+    A["Image"] --> B["ViT + Projector"]
+    Q["Question"] --> C["Decoder LLM"]
+    B --> C
+    C --> D["Action 1: PROPOSE"]
+    D --> E["Draft Answer / Claim"]
+    E --> F["Action 2: VERIFY or ANSWER"]
+    B --> G["Same Visual Tokens Reused"]
+    F --> H["Verification Query"]
+    G --> I["Decoder in Verify Mode"]
+    H --> I
+    I --> J["support / contradict / insufficient"]
+    J --> K["Action 3: REVISE / ANSWER / ABSTAIN"]
+    K --> L["Final Answer"]
 ```
+
+## RL Framing
+
+AVV is best viewed as a sequential decision problem.
+
+- state: image, question, current draft, verification history, remaining budget
+- action: `PROPOSE`, `VERIFY`, `REVISE`, `ANSWER`, `ABSTAIN`
+- reward: answer correctness, verification consistency, evidence efficiency, and stopping cost
+
+The main goal is not to relearn vision or language from scratch. It is to learn a better **control policy** over an existing VLM.
 
 ## Training Stages
 
-### Stage 1: Pointer Pretraining
-- supervise evidence localization with GT boxes or relation-derived pseudo boxes
-- train only the pointer and light query heads
+### Stage 0: Supervised Warm Start
+- teach the model three modes with structured prompts:
+- `draft mode`
+- `verify mode`
+- `final mode`
 
-### Stage 2: Verifier Pretraining
-- crop regions from GT evidence
-- train a verifier to classify `support`, `contradict`, or `insufficient`
-- add counterfactual relation swaps and flip-consistency
+### Stage 1: Oracle-Guided Imitation
+- build trajectories from synthetic data or box-derived relations
+- imitate when to verify, when to revise, and when to stop
 
-### Stage 3: Joint Fine-tuning
-- connect proposal, pointer, cropper, verifier, and decision head
-- optimize answer quality together with evidence faithfulness
+### Stage 2: RL Fine-tuning
+- optimize the self-verification policy
+- reward correct final answers
+- reward consistent verification
+- penalize unnecessary extra verification steps
 
 ## Method Draft
 
@@ -131,7 +133,6 @@ python scripts/train_joint.py --config configs/stage3_joint.yaml
 ## Current Status
 
 This repo is intentionally reset to a research skeleton:
-- configs define the AVV training stages
-- data builders generate relation-level samples from box annotations
-- model modules expose proposal, pointer, crop, verification, and decision interfaces
-- training entrypoints are minimal and ready for implementation
+- docs now reflect the RL-style self-verification direction
+- data builders still provide relation-level supervision for warm start
+- code remains a scaffolding repo and will need a later pass to fully match the shared-policy formulation
