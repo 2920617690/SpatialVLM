@@ -1,0 +1,14 @@
+inherits: "configs/base.yaml"
+
+stage: "joint"
+
+training:
+  epochs: 6
+  batch_size: 16
+  learning_rate: 2.0e-4
+
+optimize:
+  train_proposal: true
+  train_pointer: true
+  train_verifier: true
+  train_decision: true
