@@ -103,7 +103,8 @@ flowchart LR
 
 ## Method Draft
 
-The paper-style method writeup lives in [docs/method.md](/Users/fwk/Downloads/vlm/docs/method.md).
+- English: [docs/method.md](/Users/fwk/Downloads/vlm/docs/method.md)
+- 中文版: [docs/method_zh.md](/Users/fwk/Downloads/vlm/docs/method_zh.md)
 
 ## Quick Start
 

@@ -4,22 +4,22 @@
 
 Given an image `x` and a question `q`, standard VLMs directly model:
 
-\[
-p(y \mid x, q)
-\]
+```text
+p(y | x, q)
+```
 
 where `y` is the answer text. This objective is underconstrained for spatial reasoning. It rewards the model for producing the correct answer, but does not require the model to preserve or check the visual evidence that justifies the answer.
 
-We instead treat spatial QA as a **hypothesis verification** problem. The model first proposes an answer `y_0`, then gathers localized evidence and verifies whether that evidence supports the implied spatial claim before emitting a final answer `y^*`.
+We instead treat spatial QA as a hypothesis verification problem. The model first proposes an answer `y0`, then gathers localized evidence and verifies whether that evidence supports the implied spatial claim before emitting a final answer `y*`.
 
 ## 2. Core Hypothesis
 
 Spatial failures often arise because the model commits too early:
 
-- it binds the wrong instance,
-- reads the wrong local region,
-- compresses the wrong visual detail into language,
-- and never visually checks its own claim.
+- it binds the wrong instance
+- it reads the wrong local region
+- it compresses the wrong visual detail into language
+- it never visually checks its own claim
 
 The main intervention is therefore small but structural:
 
@@ -29,13 +29,13 @@ The main intervention is therefore small but structural:
 
 AVV has five stages:
 
-1. `Proposal`: produce an initial answer `y_0`.
-2. `Evidence Query`: derive a compact query `z_0` describing what evidence would justify `y_0`.
-3. `Evidence Localization`: predict evidence regions for object `A` and object `B`.
-4. `Re-Perception`: crop those regions from the original image and re-encode them at higher fidelity.
-5. `Verification`: decide whether the re-read evidence supports, contradicts, or is insufficient for the proposed claim.
+1. `Proposal`: produce an initial answer `y0`
+2. `Evidence Query`: derive a compact query `z0` describing what evidence would justify `y0`
+3. `Evidence Localization`: predict evidence regions for object `A` and object `B`
+4. `Re-Perception`: crop those regions from the original image and re-encode them at higher fidelity
+5. `Verification`: decide whether the re-read evidence supports, contradicts, or is insufficient for the proposed claim
 
-The final decision head combines the proposal confidence and verification output to produce `y^*`.
+The final decision head combines the proposal confidence and verification output to produce `y*`.
 
 ## 4. Architecture
 
@@ -43,7 +43,7 @@ The final decision head combines the proposal confidence and verification output
 
 The backbone encodes:
 
-- image tokens `V = \{v_i\}_{i=1}^N`
+- image tokens `V = {v_i} for i = 1...N`
 - question representation `q_h`
 
 The framework does not assume a specific VLM family. The only requirement is access to image features and a question-conditioned context vector.
@@ -52,51 +52,53 @@ The framework does not assume a specific VLM family. The only requirement is acc
 
 The proposal head produces:
 
-\[
-p_\theta(y_0 \mid x, q)
-\]
+```text
+p_theta(y0 | x, q)
+```
 
 and an evidence query vector:
 
-\[
-z_0 = f_{\text{evidence}}(V, q_h, y_0)
-\]
+```text
+z0 = f_evidence(V, q_h, y0)
+```
 
-`z_0` is not a full chain-of-thought. It is a compact latent descriptor of what the model believes should be checked next.
+`z0` is not a full chain-of-thought. It is a compact latent descriptor of what the model believes should be checked next.
 
 ### 4.3 Evidence Pointer
 
 The pointer head predicts evidence regions:
 
-\[
-b_A, b_B = f_{\text{ptr}}(V, q_h, z_0)
-\]
+```text
+bA, bB = f_ptr(V, q_h, z0)
+```
 
-where `b_A` and `b_B` are boxes or heatmaps corresponding to the two object regions that matter for the spatial claim.
+where `bA` and `bB` are boxes or heatmaps corresponding to the two object regions that matter for the spatial claim.
 
 ### 4.4 Re-Perception Module
 
 The key difference from latent-only reasoning is that AVV returns to pixels:
 
-\[
-\hat{x}_A = \text{crop}(x, b_A), \quad \hat{x}_B = \text{crop}(x, b_B)
-\]
+```text
+xA_hat = crop(x, bA)
+xB_hat = crop(x, bB)
+```
 
 These crops are re-encoded to obtain evidence features:
 
-\[
-f_A = g(\hat{x}_A), \quad f_B = g(\hat{x}_B)
-\]
+```text
+fA = g(xA_hat)
+fB = g(xB_hat)
+```
 
 This step is meant to correct first-pass errors caused by patch boundaries, coarse readout, or wrong instance binding.
 
 ### 4.5 Hypothesis Builder
 
-The pair `(q, y_0)` is converted into a structured claim:
+The pair `(q, y0)` is converted into a structured claim:
 
-\[
-c = h(q, y_0)
-\]
+```text
+c = h(q, y0)
+```
 
 Examples:
 
@@ -107,15 +109,15 @@ Examples:
 
 The verifier predicts:
 
-\[
-p_\theta(v \mid f_A, f_B, c)
-\]
+```text
+p_theta(v | fA, fB, c)
+```
 
 where:
 
-\[
-v \in \{\text{support}, \text{contradict}, \text{insufficient}\}
-\]
+```text
+v in {support, contradict, insufficient}
+```
 
 The verifier is deliberately discriminative rather than generative. It should answer one narrow question: does the localized evidence support the proposed claim?
 
@@ -123,68 +125,69 @@ The verifier is deliberately discriminative rather than generative. It should an
 
 The final answer is computed from proposal confidence and verification state:
 
-\[
-p_\theta(y^* \mid y_0, v, q_h)
-\]
+```text
+p_theta(y* | y0, v, q_h)
+```
 
 In the simplest case:
 
-- keep `y_0` if `v = support`,
-- flip or revise if `v = contradict`,
-- abstain or trigger fallback if `v = insufficient`.
+- keep `y0` if `v = support`
+- flip or revise if `v = contradict`
+- abstain or trigger fallback if `v = insufficient`
 
 ## 5. Training Objective
 
 The total objective is:
 
-\[
-\mathcal{L} =
-\mathcal{L}_{ans} +
-\lambda_{final}\mathcal{L}_{final} +
-\lambda_{ptr}\mathcal{L}_{ptr} +
-\lambda_{ver}\mathcal{L}_{ver} +
-\lambda_{cf}\mathcal{L}_{cf} +
-\lambda_{cons}\mathcal{L}_{cons}
-\]
+```text
+L =
+  L_ans
+  + lambda_final * L_final
+  + lambda_ptr * L_ptr
+  + lambda_ver * L_ver
+  + lambda_cf * L_cf
+  + lambda_cons * L_cons
+```
 
 ### 5.1 Proposal Loss
 
-\[
-\mathcal{L}_{ans} = \mathrm{CE}(p_\theta(y_0 \mid x, q), y)
-\]
+```text
+L_ans = CE(p_theta(y0 | x, q), y)
+```
 
 ### 5.2 Final Answer Loss
 
-\[
-\mathcal{L}_{final} = \mathrm{CE}(p_\theta(y^* \mid x, q), y)
-\]
+```text
+L_final = CE(p_theta(y* | x, q), y)
+```
 
 ### 5.3 Pointer Loss
 
 For box supervision:
 
-\[
-\mathcal{L}_{ptr} =
-\mathrm{L1}(b_A, b_A^*) + \mathrm{L1}(b_B, b_B^*) +
-\mathrm{GIoU}(b_A, b_A^*) + \mathrm{GIoU}(b_B, b_B^*)
-\]
+```text
+L_ptr =
+  L1(bA, bA*)
+  + L1(bB, bB*)
+  + GIoU(bA, bA*)
+  + GIoU(bB, bB*)
+```
 
 For heatmap supervision, BCE can replace the box losses.
 
 ### 5.4 Verifier Loss
 
-\[
-\mathcal{L}_{ver} = \mathrm{CE}(p_\theta(v \mid f_A, f_B, c), v^*)
-\]
+```text
+L_ver = CE(p_theta(v | fA, fB, c), v*)
+```
 
 ### 5.5 Counterfactual Loss
 
-For the same evidence pair, construct an incorrect relation claim `\tilde{c}` and require contradiction:
+For the same evidence pair, construct an incorrect relation claim `c_tilde` and require contradiction:
 
-\[
-\mathcal{L}_{cf} =
--\log p_\theta(v=\text{contradict} \mid f_A, f_B, \tilde{c})
-\]
+```text
+L_cf = -log p_theta(v = contradict | fA, fB, c_tilde)
+```
 
 This discourages shortcut learning from object co-occurrence alone.
 
@@ -192,13 +195,13 @@ This discourages shortcut learning from object co-occurrence alone.
 
 For a geometric transform `g` and the corresponding language transform `T_g`, require equivariant verification:
 
-\[
-\mathcal{L}_{cons} =
-D\Big(
-p_\theta(v \mid g(x), T_g(q)),
-T_g\big(p_\theta(v \mid x, q)\big)
-\Big)
-\]
+```text
+L_cons =
+  D(
+    p_theta(v | g(x), T_g(q)),
+    T_g(p_theta(v | x, q))
+  )
+```
 
 In practice, the first transform to use is horizontal flip with `left <-> right`.
 
@@ -206,15 +209,15 @@ In practice, the first transform to use is horizontal flip with `left <-> right`
 
 Each sample is promoted from `(image, question, answer)` to:
 
-\[
-(x, A, B, r, q, y, b_A^*, b_B^*)
-\]
+```text
+(x, A, B, r, q, y, bA*, bB*)
+```
 
 where:
 
-- `A, B` are object instances,
-- `r` is a geometric relation,
-- `b_A^*, b_B^*` are evidence boxes.
+- `A, B` are object instances
+- `r` is a geometric relation
+- `bA*, bB*` are evidence boxes
 
 ### 6.1 Data Sources
 
@@ -250,9 +253,9 @@ For each valid object pair `(A, B)`:
 
 Hard negatives are built by:
 
-- swapping near-by same-class instances,
-- substituting confusable relations,
-- degrading one crop to create `insufficient` cases.
+- swapping nearby same-class instances
+- substituting confusable relations
+- degrading one crop to create `insufficient` cases
 
 ## 7. Stage-wise Training
 
@@ -260,40 +263,40 @@ Hard negatives are built by:
 
 Train only evidence localization:
 
-\[
-\mathcal{L}^{(1)} = \mathcal{L}_{ptr}
-\]
+```text
+L_stage1 = L_ptr
+```
 
 ### Stage 2: Verifier Pretraining
 
 Use GT crops and train only verification:
 
-\[
-\mathcal{L}^{(2)} =
-\mathcal{L}_{ver} +
-\lambda_{cf}\mathcal{L}_{cf} +
-\lambda_{cons}\mathcal{L}_{cons}
-\]
+```text
+L_stage2 =
+  L_ver
+  + lambda_cf * L_cf
+  + lambda_cons * L_cons
+```
 
 ### Stage 3: Joint Fine-tuning
 
 Connect the full loop:
 
-\[
-\mathcal{L}^{(3)} =
-\mathcal{L}_{ans} +
-\lambda_{final}\mathcal{L}_{final} +
-\lambda_{ptr}\mathcal{L}_{ptr} +
-\lambda_{ver}\mathcal{L}_{ver} +
-\lambda_{cf}\mathcal{L}_{cf} +
-\lambda_{cons}\mathcal{L}_{cons}
-\]
+```text
+L_stage3 =
+  L_ans
+  + lambda_final * L_final
+  + lambda_ptr * L_ptr
+  + lambda_ver * L_ver
+  + lambda_cf * L_cf
+  + lambda_cons * L_cons
+```
 
 ## 8. Why This Is Different
 
 AVV does not assume the model needs deeper latent iteration by default. It assumes a simpler failure mode:
 
-- the answer was proposed before the relevant visual detail was checked.
+- the answer was proposed before the relevant visual detail was checked
 
 This makes the intervention smaller than redesigning the entire encoder-decoder stack, but more targeted than adding generic reasoning tokens.
 
