@@ -1,102 +1,60 @@
-# AVV: Self-Verification Policy Learning for VLMs
+# AVV with Qwen3.5-4B
 
-## 1. Setting
+## 1. Concrete Base Model
 
-We consider the standard VLM setting:
-
-```text
-image -> ViT -> projector -> decoder-only LLM -> answer
-```
-
-The central claim of this project is that many spatial errors do not come from missing model capacity alone. They come from **premature commitment**. The model proposes an answer before it has verified whether the underlying visual claim is actually supported by the image.
-
-Instead of redesigning the whole architecture, we keep the original `ViT + projector + decoder` backbone and change the problem from one-shot answering to multi-step self-verification.
-
-## 2. Core Hypothesis
-
-For spatial questions, the model should not only answer. It should learn a policy that decides:
-
-1. when to propose a draft answer
-2. when to verify that draft
-3. whether to revise the draft after verification
-4. when to stop and commit
-
-This is better viewed as a sequential decision problem than as a single supervised mapping.
-
-## 3. Why This Is Not Just Prompt Engineering
-
-If we only ask the same VLM to "think twice" at inference time, the method is just prompt engineering.
-
-It becomes a real method only when the model is trained to perform three distinct behaviors:
-
-1. `draft mode`: produce a draft answer or claim
-2. `verify mode`: judge whether the draft is supported by the image
-3. `final mode`: produce the final answer after incorporating the verification result
-
-These are not just different prompts. They are different supervised or reinforced behaviors over shared model parameters.
-
-## 4. Shared-Backbone Formulation
-
-We intentionally avoid assuming new permanent modules. The preferred formulation reuses the same VLM across multiple passes.
-
-### 4.1 Draft Pass
-
-Given image `x` and question `q`, the decoder produces:
+This codebase assumes a real multimodal base model:
 
 ```text
-y0 = draft answer
-c0 = draft claim
+image -> ViT -> projector -> decoder-only LLM
 ```
 
-Example:
+The default implementation targets `Qwen3.5-4B`.
+
+The working claim is not that we need more permanent reasoning modules. The working claim is that the same VLM should learn a better control policy over answering:
 
 ```text
-Question: Is the cat to the left of the dog?
-Draft: answer = yes, claim = cat left of dog
+draft -> verify -> final
 ```
 
-### 4.2 Verify Pass
+## 2. Training Objective
 
-The same VLM is then called again in verification mode:
+We train the shared Qwen model in three supervised modes:
+
+### Draft Mode
 
 ```text
-input: image x + claim c0
-output: v0 in {support, contradict, insufficient}
+input: image + question
+target: structured draft response
 ```
 
-This is deliberately a narrow output space. The goal is to reduce shortcut freedom and force a hard judgment.
+The target contains:
 
-### 4.3 Final Pass
+- proposed answer
+- draft claim
+- decomposed subclaims
 
-The model is called one more time:
+### Verify Mode
 
 ```text
-input: image x + question q + draft y0/c0 + verification result v0
-output: final answer y*
+input: image + question + draft claim
+target: structured verification response
 ```
 
-The final answer may preserve, revise, or reject the initial draft.
+The target contains:
 
-## 5. RL Formulation
+- per-subclaim verdicts
+- overall verdict in `{support, contradict, insufficient}`
 
-We model self-verification as a partially observable sequential decision process.
+### Final Mode
 
-### 5.1 State
+```text
+input: image + question + draft response + verification response
+target: final answer
+```
 
-The policy state at step `t` contains:
+## 3. Policy Learning
 
-- image `x`
-- question `q`
-- current draft answer `y_t`
-- current claim `c_t`
-- verification history `h_t`
-- remaining computation budget `B_t`
-
-The state is not the full world state. It is the model's current belief and interaction history.
-
-### 5.2 Action Space
-
-We use a small discrete action space:
+After warm start, we treat the same shared model as a policy over high-level actions:
 
 ```text
 PROPOSE
@@ -106,181 +64,72 @@ ANSWER
 ABSTAIN
 ```
 
-Possible future refinements may add actions such as region-specific reinspection, but the minimal formulation should start with high-level control actions.
+The main learning target is not "how to do vision from scratch." It is:
 
-### 5.3 Transition
-
-Each action triggers another pass through the same VLM in a different mode:
-
-- `PROPOSE`: create or update a draft claim
-- `VERIFY`: check whether the current claim is supported
-- `REVISE`: rewrite the claim or answer after contradiction
-- `ANSWER`: terminate and emit final answer
-- `ABSTAIN`: terminate without committing to a risky answer
-
-### 5.4 Reward
-
-A practical reward should combine correctness and efficiency.
-
-```text
-R =
-  final answer reward
-  + verification consistency reward
-  - unnecessary verification cost
-  - contradiction-ignored penalty
-```
-
-A simple version is:
-
-- correct final answer: `+1.0`
-- correct verification label: `+0.2`
-- each extra verification step: `-0.05`
-- answering despite contradiction: `-0.3`
-- abstention when truly ambiguous: small positive reward
-
-The exact coefficients are secondary. The principle is that verification should help, but endless checking should be discouraged.
-
-## 6. Training Pipeline
-
-Pure RL from scratch is not the right starting point. The recommended pipeline has three stages.
-
-### Stage 0: Supervised Warm Start
-
-Train the shared VLM on three supervised formats:
-
-#### Draft Mode
-
-```text
-input: image + question
-target: draft answer + draft claim
-```
-
-#### Verify Mode
-
-```text
-input: image + claim
-target: support / contradict / insufficient
-```
-
-#### Final Mode
-
-```text
-input: image + question + draft + verification
-target: final answer
-```
-
-Loss:
-
-```text
-L_sft =
-  L_draft
-  + lambda_verify * L_verify
-  + lambda_final * L_final
-```
-
-### Stage 1: Oracle-Guided Imitation
-
-Use synthetic data or box-derived relations to construct good trajectories:
-
-- if the relation is obvious, answer directly
-- if the relation is hard or counterfactual, verify first
-- if verification contradicts the draft, revise
-- then answer
-
-This stage teaches the policy a reasonable initial control flow before RL.
-
-### Stage 2: RL Fine-tuning
-
-Run policy optimization over multi-step episodes.
-
-The objective is no longer just token imitation. It is expected return:
-
-```text
-J(pi) = E_pi [ sum_t gamma^t r_t ]
-```
-
-The exact algorithm is flexible. PPO-style fine-tuning is a natural starting point, but the method does not depend on one specific optimizer.
-
-## 7. Data Construction
-
-The warm-start and imitation stages still require structured supervision.
-
-Each sample should be promoted from:
-
-```text
-(image, question, answer)
-```
-
-to:
-
-```text
-(image, question, claim, verify_label, final_answer)
-```
-
-Primary sources:
-
-- COCO instances
-- Visual Genome
-- RefCOCO / RefCOCOg
-- CLEVR
-- synthetic grid, chart, table, or GUI tasks
-
-For bbox-based datasets, relation labels can be programmatically derived:
-
-- `left_of`
-- `right_of`
-- `above`
-- `below`
-- `overlap`
-- `inside`
-- `larger_than`
-- `smaller_than`
-
-This data is especially useful for training verify-mode and for imitation trajectories.
-
-## 8. Why RL Helps
-
-Supervised learning is good at teaching:
-
-- what a valid draft looks like
-- what a valid verification label looks like
-- how to verbalize the final answer
-
-RL is useful for what supervision does not naturally solve:
-
-- when verification is necessary
-- how often to verify
+- when to verify
 - when to revise
 - when to stop
 
-So RL should not replace the whole VLM training recipe. It should focus on **verification policy learning**.
+## 4. BVPO
 
-## 9. Main Risk
+The repo includes a lightweight stage-2 trainer called `BVPO`:
 
-If verification is judged only by the model itself, reward hacking becomes likely.
+`Budgeted Verification Policy Optimization`
 
-The model may learn to:
+Its reward has four components:
 
-- invent a draft
-- invent a matching verification label
-- remain self-consistent without becoming visually faithful
+```text
+R =
+  answer_reward
+  + verify_reward
+  - step_cost
+  - contradiction_penalty
+```
 
-Therefore, early training and reward design should rely as much as possible on external truth:
+The purpose of the algorithm is to make verification useful but not free. If the model keeps verifying without need, return should go down.
 
-- synthetic geometry
-- box-derived relations
-- deterministic flip consistency
-- programmatic relation checkers
+## 5. Why Synthetic Data Comes First
 
-## 10. Practical Ablations
+Before using noisy real-world QA, the repo uses synthetic spatial scenes because they provide:
 
-The first ablations that matter are:
+- exact object identities
+- exact bounding boxes
+- exact subclaims
+- exact verification labels
+- exact imitation trajectories
 
-1. one-shot answer only
-2. draft + final without verify mode
-3. supervised multi-pass without RL
-4. RL with no verification cost
-5. RL with no contradiction penalty
-6. GT relation labels vs noisy relation labels
+This is especially important for training `verify mode` and stage-1 imitation.
 
-These ablations test whether gains come from true policy learning rather than just longer prompting.
+## 6. Sample Structure
+
+Each training sample stores:
+
+```text
+image_path
+question
+answer
+draft_response
+verify_response
+final_response
+subclaims
+trajectory
+scene_objects
+```
+
+This structure supports:
+
+- stage-0 SFT
+- stage-1 imitation
+- stage-2 RL rollouts
+
+## 7. Recommended Experimental Order
+
+The intended experimental order is:
+
+1. one-shot baseline on synthetic tasks
+2. stage-0 SFT on `draft / verify / final`
+3. stage-1 imitation on oracle trajectories
+4. stage-2 BVPO fine-tuning
+5. later transfer to real data
+
+That order matters. If stage-0 and stage-1 do not help, RL should not be trusted to rescue the idea.

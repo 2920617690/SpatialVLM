@@ -1,0 +1,19 @@
+inherits: "configs/base.yaml"
+
+stage: "stage2_bvpo"
+
+dataset:
+  modes:
+    - "policy"
+
+training:
+  num_train_epochs: 1
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+
+policy:
+  episodes_per_epoch: 64
+  max_episode_steps: 4
+  rollout_temperature: 0.8
+  rollout_top_p: 0.95
+  learning_rate: 1.0e-6

@@ -1,0 +1,28 @@
+output:
+  root: "./data/synthetic/qwen35_avv"
+
+render:
+  image_size: 448
+  background: [248, 248, 245]
+
+splits:
+  train: 8000
+  val: 1000
+  test: 1000
+
+scene:
+  min_objects: 3
+  max_objects: 6
+  min_object_size: 56
+  max_object_size: 108
+  max_overlap_ratio: 0.08
+
+tasks:
+  atomic_yesno: 0.30
+  conjunction_yesno: 0.18
+  reference_yesno: 0.16
+  compare_distance_yesno: 0.16
+  count_relation: 0.10
+  chain_relation_yesno: 0.10
+
+seed: 42

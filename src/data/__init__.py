@@ -1,3 +1,22 @@
-from .schema import RelationSample, save_relation_manifest
+from .schema import AVVSample, RelationSample, SceneObject, SubClaim, TrajectoryStep, load_avv_samples
+from .synthetic_generator import generate_synthetic_dataset
 
-__all__ = ["RelationSample", "save_relation_manifest"]
+try:
+    from .multimodal_dataset import AVVPolicyDataset, AVVSupervisedDataset, QwenChatCollator
+except ModuleNotFoundError:
+    AVVPolicyDataset = None
+    AVVSupervisedDataset = None
+    QwenChatCollator = None
+
+__all__ = [
+    "AVVPolicyDataset",
+    "AVVSample",
+    "AVVSupervisedDataset",
+    "QwenChatCollator",
+    "RelationSample",
+    "SceneObject",
+    "SubClaim",
+    "TrajectoryStep",
+    "generate_synthetic_dataset",
+    "load_avv_samples",
+]

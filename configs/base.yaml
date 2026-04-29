@@ -1,49 +1,77 @@
 project:
-  name: "avv"
+  name: "qwen35_avv"
   seed: 42
-  output_dir: "./outputs"
-
-data:
-  train_manifest: "./data/train_relations.jsonl"
-  val_manifest: "./data/val_relations.jsonl"
-  image_root: "./data/images"
-  num_workers: 4
-  answer_labels: ["yes", "no"]
-  verifier_labels: ["support", "contradict", "insufficient"]
-  relation_labels:
-    - "left_of"
-    - "right_of"
-    - "above"
-    - "below"
-    - "overlap"
-    - "inside"
-    - "intersect"
-    - "larger_than"
-    - "smaller_than"
+  output_root: "./outputs/qwen35_avv"
 
 model:
-  image_channels: 3
-  image_size: 224
-  hidden_dim: 256
-  question_dim: 256
-  vocab_size: 4096
-  patch_dim: 256
-  num_patches: 196
-  crop_size: 160
-  answer_classes: 2
-  verifier_classes: 3
+  base_model_id: "Qwen/Qwen3.5-4B"
+  trust_remote_code: true
+  torch_dtype: "bfloat16"
+  attn_implementation: "sdpa"
+  gradient_checkpointing: true
+  use_flash_attention_2: false
+  freeze_vision_tower: false
+  max_image_resolution: 448
+  max_prompt_length: 4096
+  max_generation_tokens:
+    draft: 256
+    verify: 256
+    final: 256
+    policy: 128
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+data:
+  root: "./data/synthetic/qwen35_avv"
+  train_manifest: "./data/synthetic/qwen35_avv/manifests/train.jsonl"
+  val_manifest: "./data/synthetic/qwen35_avv/manifests/val.jsonl"
+  test_manifest: "./data/synthetic/qwen35_avv/manifests/test.jsonl"
+  image_root: "./data/synthetic/qwen35_avv/images"
+  max_train_samples: null
+  max_eval_samples: null
+  num_workers: 2
 
 training:
-  epochs: 5
-  batch_size: 16
-  learning_rate: 3.0e-4
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16
+  learning_rate: 2.0e-5
   weight_decay: 0.01
-  log_every: 20
-  device: "cpu"
+  num_train_epochs: 1
+  warmup_ratio: 0.03
+  logging_steps: 10
+  eval_steps: 100
+  save_steps: 100
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 2
+  report_to: []
+  remove_unused_columns: false
 
-loss:
-  lambda_final: 1.0
-  lambda_ptr: 1.0
-  lambda_ver: 1.0
-  lambda_cf: 0.5
-  lambda_cons: 0.1
+policy:
+  max_episode_steps: 4
+  discount: 0.99
+  verify_reward: 0.2
+  answer_reward: 1.0
+  step_cost: 0.05
+  contradiction_penalty: 0.3
+  abstain_reward: 0.1
+  normalize_returns: true
+  rollout_temperature: 0.8
+  rollout_top_p: 0.95
+  learning_rate: 1.0e-6
+  episodes_per_epoch: 64
+  gradient_clip_norm: 1.0

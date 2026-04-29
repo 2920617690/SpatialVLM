@@ -1,27 +1,18 @@
-# AVV: Answer, Visual Evidence, Verify
+# AVV for Qwen3.5-4B
 
-This repository is now organized around a different hypothesis:
+This repository targets a concrete experimental setup:
 
-**many spatial failures in VLMs come from committing too early, before the model has verified its own visual claim.**
+- base model: `Qwen3.5-4B`
+- backbone assumption: `ViT + projector + decoder-only LLM`
+- training objective: teach the same VLM to execute `draft -> verify -> final`
+- policy objective: learn `when to verify`, `when to revise`, and `when to stop`
 
-The current direction is no longer "add more reasoning modules." It is:
+The current codebase is organized to support:
 
-- keep the original `ViT + projector + decoder` VLM
-- run it as a multi-step policy instead of a one-shot answerer
-- train the policy to decide when to propose, verify, revise, and stop
-
-## Core Idea
-
-Standard VLMs optimize `p(y | x, q)` and are rewarded for answering directly.
-AVV changes the problem structure from:
-
-`(x, q) -> y`
-
-to:
-
-`(x, q) -> propose -> verify -> revise or answer`
-
-This turns spatial QA into a **self-verification policy learning** problem rather than a pure direct-generation problem.
+1. synthetic spatial data generation
+2. stage-0 supervised warm start
+3. stage-1 oracle-guided imitation learning
+4. stage-2 budgeted verification policy optimization (BVPO)
 
 ## Repository Layout
 
@@ -29,110 +20,99 @@ This turns spatial QA into a **self-verification policy learning** problem rathe
 vlm/
 ├── configs/
 │   ├── base.yaml
-│   ├── stage1_pointer.yaml
-│   ├── stage2_verifier.yaml
-│   └── stage3_joint.yaml
+│   ├── stage0_sft.yaml
+│   ├── stage1_imitation.yaml
+│   ├── stage2_bvpo.yaml
+│   └── synth_data.yaml
 ├── docs/
-│   └── method.md
+│   ├── data_pipeline.md
+│   ├── method.md
+│   └── method_zh.md
 ├── scripts/
 │   ├── build_relation_data.py
-│   ├── train_joint.py
-│   ├── train_pointer.py
-│   └── train_verifier.py
+│   ├── synthesize_data.py
+│   ├── train_imitation.py
+│   ├── train_policy.py
+│   └── train_sft.py
 ├── src/
 │   ├── data/
-│   │   ├── relation_dataset.py
-│   │   └── builders/
-│   ├── eval/
-│   ├── losses/
 │   ├── model/
-│   │   ├── backbone/
-│   │   ├── cropper/
-│   │   ├── pointer/
-│   │   ├── proposal/
-│   │   ├── verifier/
-│   │   └── avv_model.py
+│   ├── rl/
 │   └── train/
 └── requirements.txt
 ```
 
-## AVV Pipeline
+## Main Idea
 
-```mermaid
-flowchart LR
-    A["Image"] --> B["ViT + Projector"]
-    Q["Question"] --> C["Decoder LLM"]
-    B --> C
-    C --> D["Action 1: PROPOSE"]
-    D --> E["Draft Answer / Claim"]
-    E --> F["Action 2: VERIFY or ANSWER"]
-    B --> G["Same Visual Tokens Reused"]
-    F --> H["Verification Query"]
-    G --> I["Decoder in Verify Mode"]
-    H --> I
-    I --> J["support / contradict / insufficient"]
-    J --> K["Action 3: REVISE / ANSWER / ABSTAIN"]
-    K --> L["Final Answer"]
+Instead of attaching heavy extra modules to the VLM, this repo uses the same multimodal model across multiple modes:
+
+- `draft mode`: produce a structured draft answer and draft claim
+- `verify mode`: judge whether the claim is supported by the image
+- `final mode`: produce the final answer after seeing the verification result
+- `policy mode`: decide the next high-level action among `PROPOSE`, `VERIFY`, `REVISE`, `ANSWER`, `ABSTAIN`
+
+## Data Path
+
+The default synthetic data path is:
+
+```text
+data/synthetic/qwen35_avv/
+├── images/
+│   ├── train/
+│   ├── val/
+│   └── test/
+├── manifests/
+│   ├── train.jsonl
+│   ├── val.jsonl
+│   └── test.jsonl
+└── metadata/
+    ├── train_summary.json
+    ├── val_summary.json
+    └── test_summary.json
 ```
 
-## RL Framing
-
-AVV is best viewed as a sequential decision problem.
-
-- state: image, question, current draft, verification history, remaining budget
-- action: `PROPOSE`, `VERIFY`, `REVISE`, `ANSWER`, `ABSTAIN`
-- reward: answer correctness, verification consistency, evidence efficiency, and stopping cost
-
-The main goal is not to relearn vision or language from scratch. It is to learn a better **control policy** over an existing VLM.
-
-## Training Stages
-
-### Stage 0: Supervised Warm Start
-- teach the model three modes with structured prompts:
-- `draft mode`
-- `verify mode`
-- `final mode`
-
-### Stage 1: Oracle-Guided Imitation
-- build trajectories from synthetic data or box-derived relations
-- imitate when to verify, when to revise, and when to stop
-
-### Stage 2: RL Fine-tuning
-- optimize the self-verification policy
-- reward correct final answers
-- reward consistent verification
-- penalize unnecessary extra verification steps
-
-## Method Draft
-
-- English: [docs/method.md](/Users/fwk/Downloads/vlm/docs/method.md)
-- 中文版: [docs/method_zh.md](/Users/fwk/Downloads/vlm/docs/method_zh.md)
+See [docs/data_pipeline.md](/Users/fwk/Downloads/vlm/docs/data_pipeline.md) for the full synthesis path and schema.
 
 ## Quick Start
 
-Install dependencies:
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Build relation data:
+### 2. Synthesize data
 
 ```bash
-python scripts/build_relation_data.py --help
+python3 scripts/synthesize_data.py --config configs/synth_data.yaml
 ```
 
-Run stage-wise training:
+### 3. Stage-0 SFT
 
 ```bash
-python scripts/train_pointer.py --config configs/stage1_pointer.yaml
-python scripts/train_verifier.py --config configs/stage2_verifier.yaml
-python scripts/train_joint.py --config configs/stage3_joint.yaml
+python3 scripts/train_sft.py --config configs/stage0_sft.yaml
 ```
 
-## Current Status
+### 4. Stage-1 Imitation
 
-This repo is intentionally reset to a research skeleton:
-- docs now reflect the RL-style self-verification direction
-- data builders still provide relation-level supervision for warm start
-- code remains a scaffolding repo and will need a later pass to fully match the shared-policy formulation
+```bash
+python3 scripts/train_imitation.py --config configs/stage1_imitation.yaml
+```
+
+### 5. Stage-2 BVPO
+
+```bash
+python3 scripts/train_policy.py --config configs/stage2_bvpo.yaml
+```
+
+## Docs
+
+- English method note: [docs/method.md](/Users/fwk/Downloads/vlm/docs/method.md)
+- 中文方法说明: [docs/method_zh.md](/Users/fwk/Downloads/vlm/docs/method_zh.md)
+- Data synthesis path and schema: [docs/data_pipeline.md](/Users/fwk/Downloads/vlm/docs/data_pipeline.md)
+
+## Practical Notes
+
+- The config defaults to `Qwen/Qwen3.5-4B`. If your actual checkpoint id differs, change `model.base_model_id`.
+- The stage-0 and stage-1 code paths are the most concrete parts of the repo.
+- The stage-2 BVPO implementation is intentionally lightweight and research-oriented. It is meant as an experimental starting point, not a production RL trainer.
