@@ -329,11 +329,13 @@ def _choose_task_name(config: Dict[str, Any], rng: random.Random) -> str:
 
 def _generate_single_sample(
     split: str,
-    index: int,
+    scene_index: int,
+    question_index: int,
     config: Dict[str, Any],
     rng: random.Random,
+    objects: Optional[Sequence[SceneObject]] = None,
 ) -> AVVSample:
-    objects = _sample_scene_objects(config, rng)
+    objects = list(objects) if objects is not None else _sample_scene_objects(config, rng)
     task_name = _choose_task_name(config, rng)
 
     task_payload = None
@@ -354,9 +356,11 @@ def _generate_single_sample(
     )
     verify_json = json.loads(verify_response)
     trajectory = _build_trajectory(verify_json["overall_verdict"])
-    image_rel_path = Path("images") / split / f"{split}_{index:06d}.png"
+    scene_id = f"{split}_{scene_index:06d}"
+    sample_id = f"{scene_id}_q{question_index:02d}"
+    image_rel_path = Path("images") / split / f"{scene_id}.png"
     return AVVSample(
-        sample_id=f"{split}_{index:06d}",
+        sample_id=sample_id,
         split=split,
         image_path=str(image_rel_path),
         task_type=task_name,
@@ -369,8 +373,17 @@ def _generate_single_sample(
         trajectory=trajectory,
         scene_objects=list(objects),
         metadata={
+            "scene_id": scene_id,
+            "question_index": question_index,
             "scene_summary": _scene_summary(objects),
             "overall_verdict": verify_json["overall_verdict"],
+            "supervision_bandwidth": {
+                "num_subclaims": len(task_payload["subclaims"]),
+                "num_scene_objects": len(objects),
+                "has_draft": True,
+                "has_verify": True,
+                "has_final": True,
+            },
         },
     )
 
@@ -379,10 +392,15 @@ def _write_summary(samples: Sequence[AVVSample], output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     task_counter = Counter(sample.task_type for sample in samples)
     answer_counter = Counter(sample.answer for sample in samples)
+    scene_counter = Counter(sample.metadata.get("scene_id") for sample in samples)
+    subclaim_counts = [len(sample.subclaims) for sample in samples]
     payload = {
         "num_samples": len(samples),
+        "num_scenes": len(scene_counter),
+        "avg_questions_per_scene": len(samples) / max(len(scene_counter), 1),
         "task_counts": dict(task_counter),
         "answer_counts": dict(answer_counter),
+        "avg_subclaims_per_sample": sum(subclaim_counts) / max(len(subclaim_counts), 1),
     }
     output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -396,15 +414,28 @@ def generate_synthetic_dataset(config: Dict[str, Any]) -> None:
 
     for split, count in config["splits"].items():
         samples: List[AVVSample] = []
-        image_dir = output_root / "images" / split
-        for index in range(count):
-            sample = _generate_single_sample(split, index, config, rng)
-            image_path = output_root / sample.image_path
-            _render_scene(sample.scene_objects, image_path, image_size=image_size, background=background)
-            sample.image_path = str(image_path)
-            samples.append(sample)
+        questions_per_image = config.get("questions_per_image", {}).get(split, 1)
+        for scene_index in range(count):
+            objects = _sample_scene_objects(config, rng)
+            image_path = output_root / "images" / split / f"{split}_{scene_index:06d}.png"
+            _render_scene(objects, image_path, image_size=image_size, background=background)
+            for question_index in range(questions_per_image):
+                sample = _generate_single_sample(
+                    split=split,
+                    scene_index=scene_index,
+                    question_index=question_index,
+                    config=config,
+                    rng=rng,
+                    objects=objects,
+                )
+                sample.image_path = str(image_path)
+                samples.append(sample)
 
         manifest_path = output_root / "manifests" / f"{split}.jsonl"
         save_avv_samples(samples, manifest_path)
         _write_summary(samples, output_root / "metadata" / f"{split}_summary.json")
-        print(f"[synthesize] wrote {len(samples)} samples to {manifest_path}")
+        print(
+            f"[synthesize] split={split} scenes={count} "
+            f"questions_per_scene={questions_per_image} samples={len(samples)} "
+            f"manifest={manifest_path}"
+        )

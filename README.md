@@ -1,18 +1,14 @@
-# AVV for Qwen3.5-4B
+# QCR for Qwen3.5-4B
 
-This repository targets a concrete experimental setup:
+This repository is rewritten around a smaller and cleaner idea:
 
 - base model: `Qwen3.5-4B`
 - backbone assumption: `ViT + projector + decoder-only LLM`
-- training objective: teach the same VLM to execute `draft -> verify -> final`
-- policy objective: learn `when to verify`, `when to revise`, and `when to stop`
+- method: `Query-Conditioned Re-encoding (QCR)`
 
-The current codebase is organized to support:
+The central question is:
 
-1. synthetic spatial data generation
-2. stage-0 supervised warm start
-3. stage-1 oracle-guided imitation learning
-4. stage-2 budgeted verification policy optimization (BVPO)
+**does it help if the same image is encoded a second time after the model already knows the question?**
 
 ## Repository Layout
 
@@ -20,43 +16,61 @@ The current codebase is organized to support:
 vlm/
 ├── configs/
 │   ├── base.yaml
-│   ├── stage0_sft.yaml
-│   ├── stage1_imitation.yaml
-│   ├── stage2_bvpo.yaml
+│   ├── baseline_sft.yaml
+│   ├── qcr_sft.yaml
 │   └── synth_data.yaml
 ├── docs/
-│   ├── data_pipeline.md
+│   ├── data_schema.md
 │   ├── method.md
 │   └── method_zh.md
 ├── scripts/
 │   ├── build_relation_data.py
+│   ├── synthesize_blender_clevr.py
+│   ├── synthesize_blender_light.py
 │   ├── synthesize_data.py
-│   ├── train_imitation.py
-│   ├── train_policy.py
+│   ├── train_baseline.py
 │   └── train_sft.py
 ├── src/
 │   ├── data/
 │   ├── model/
-│   ├── rl/
 │   └── train/
 └── requirements.txt
 ```
 
-## Main Idea
+## Two Core Experiments
 
-Instead of attaching heavy extra modules to the VLM, this repo uses the same multimodal model across multiple modes:
+The repo is now organized around two models:
 
-- `draft mode`: produce a structured draft answer and draft claim
-- `verify mode`: judge whether the claim is supported by the image
-- `final mode`: produce the final answer after seeing the verification result
-- `policy mode`: decide the next high-level action among `PROPOSE`, `VERIFY`, `REVISE`, `ANSWER`, `ABSTAIN`
+1. `one-pass baseline`
+2. `QCR two-pass`
+
+### One-pass baseline
+
+```text
+image -> ViT -> projector -> decoder -> answer
+```
+
+### QCR two-pass
+
+```text
+pass 1:
+  image -> ViT -> projector -> decoder
+  read hidden state at <reencode_slot>
+
+pass 2:
+  project that hidden state into a condition token
+  prepend it to the same image token sequence
+  run a second encoding pass
+  residual-refine first-pass visual tokens
+  decode final answer
+```
 
 ## Data Path
 
-The default synthetic data path is:
+The default synthetic root is:
 
 ```text
-data/synthetic/qwen35_avv/
+data/synthetic/qwen35_qcr/
 ├── images/
 │   ├── train/
 │   ├── val/
@@ -71,7 +85,7 @@ data/synthetic/qwen35_avv/
     └── test_summary.json
 ```
 
-See [docs/data_pipeline.md](/Users/fwk/Downloads/vlm/docs/data_pipeline.md) for the full synthesis path and schema.
+See [docs/data_schema.md](/Users/fwk/Downloads/vlm/docs/data_schema.md) for the manifest schema.
 
 ## Quick Start
 
@@ -87,32 +101,42 @@ pip install -r requirements.txt
 python3 scripts/synthesize_data.py --config configs/synth_data.yaml
 ```
 
-### 3. Stage-0 SFT
+### 2b. Synthesize Blender-light data
 
 ```bash
-python3 scripts/train_sft.py --config configs/stage0_sft.yaml
+python3 scripts/synthesize_blender_light.py --config configs/blender_light_batch.json
 ```
 
-### 4. Stage-1 Imitation
+### 2c. Synthesize Blender CLEVR-style data
 
 ```bash
-python3 scripts/train_imitation.py --config configs/stage1_imitation.yaml
+python3 scripts/synthesize_blender_clevr.py --config configs/blender_clevr_batch.json
 ```
 
-### 5. Stage-2 BVPO
+### 3. Train the one-pass baseline
 
 ```bash
-python3 scripts/train_policy.py --config configs/stage2_bvpo.yaml
+python3 scripts/train_baseline.py --config configs/baseline_sft.yaml
+```
+
+### 4. Train QCR
+
+```bash
+python3 scripts/train_sft.py --config configs/qcr_sft.yaml
 ```
 
 ## Docs
 
 - English method note: [docs/method.md](/Users/fwk/Downloads/vlm/docs/method.md)
 - 中文方法说明: [docs/method_zh.md](/Users/fwk/Downloads/vlm/docs/method_zh.md)
-- Data synthesis path and schema: [docs/data_pipeline.md](/Users/fwk/Downloads/vlm/docs/data_pipeline.md)
+- Data schema: [docs/data_schema.md](/Users/fwk/Downloads/vlm/docs/data_schema.md)
+- High-bandwidth data plan: [docs/high_bandwidth_data.md](/Users/fwk/Downloads/vlm/docs/high_bandwidth_data.md)
+- Blender-light pipeline: [docs/blender_light_pipeline.md](/Users/fwk/Downloads/vlm/docs/blender_light_pipeline.md)
+- Blender CLEVR-style pipeline: [docs/blender_clevr_pipeline.md](/Users/fwk/Downloads/vlm/docs/blender_clevr_pipeline.md)
 
 ## Practical Notes
 
-- The config defaults to `Qwen/Qwen3.5-4B`. If your actual checkpoint id differs, change `model.base_model_id`.
-- The stage-0 and stage-1 code paths are the most concrete parts of the repo.
-- The stage-2 BVPO implementation is intentionally lightweight and research-oriented. It is meant as an experimental starting point, not a production RL trainer.
+- The config defaults to `Qwen/Qwen3.5-4B`.
+- `train_baseline.py` is the cleanest standard path.
+- `train_sft.py` is the QCR path.
+- The code tries to run strict same-image re-encoding through a shared vision tower interface. If the loaded checkpoint does not expose the required internals, it falls back to projected-token re-encoding and warns explicitly.

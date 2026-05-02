@@ -1,0 +1,81 @@
+{
+  "blender_binary": "/Applications/Blender.app/Contents/MacOS/Blender",
+  "output": {
+    "root": "./data/synthetic/qwen35_qcr_blender_clevr_30k"
+  },
+  "render": {
+    "engine": "BLENDER_EEVEE_NEXT",
+    "resolution_x": 960,
+    "resolution_y": 640,
+    "samples": 20,
+    "transparent_background": false
+  },
+  "splits": {
+    "train": 5400,
+    "val": 300,
+    "test": 300
+  },
+  "questions_per_image": {
+    "train": 5,
+    "val": 5,
+    "test": 5
+  },
+  "scene": {
+    "min_objects": 4,
+    "max_objects": 6,
+    "placement_radius_min": 1.5,
+    "placement_radius_max": 4.4,
+    "min_pair_distance": 1.55,
+    "layout_modes": ["ring", "line", "arc", "cluster_pair", "corner_spread"],
+    "camera_mode_cycle": ["oblique", "oblique", "topdown"],
+    "camera_distance_range": [9.5, 13.0],
+    "camera_azimuth_range": [18.0, 70.0],
+    "camera_elevation_range": [16.0, 30.0],
+    "topdown_distance_range": [10.5, 13.5],
+    "topdown_elevation_range": [68.0, 82.0],
+    "topdown_azimuth_range": [0.0, 360.0]
+  },
+  "style": {
+    "ground_palette": [
+      [0.66, 0.66, 0.66, 1.0],
+      [0.56, 0.54, 0.51, 1.0],
+      [0.45, 0.45, 0.47, 1.0]
+    ],
+    "background_palette": [
+      [0.72, 0.78, 0.92, 1.0],
+      [0.86, 0.84, 0.80, 1.0],
+      [0.78, 0.80, 0.83, 1.0]
+    ],
+    "object_palette": [
+      {"name": "red", "rgba": [0.82, 0.16, 0.16, 1.0]},
+      {"name": "blue", "rgba": [0.18, 0.40, 0.84, 1.0]},
+      {"name": "green", "rgba": [0.21, 0.60, 0.28, 1.0]},
+      {"name": "yellow", "rgba": [0.90, 0.78, 0.16, 1.0]},
+      {"name": "purple", "rgba": [0.53, 0.28, 0.73, 1.0]},
+      {"name": "cyan", "rgba": [0.12, 0.73, 0.78, 1.0]},
+      {"name": "brown", "rgba": [0.56, 0.36, 0.16, 1.0]},
+      {"name": "gray", "rgba": [0.42, 0.42, 0.42, 1.0]}
+    ],
+    "materials": [
+      {"name": "rubber", "metallic": 0.0, "roughness": 0.72},
+      {"name": "metal", "metallic": 1.0, "roughness": 0.20}
+    ]
+  },
+  "objects": {
+    "shapes": ["cube", "sphere", "cylinder", "cone"],
+    "sizes": [
+      {"name": "small", "scale": 0.52},
+      {"name": "medium", "scale": 0.76},
+      {"name": "large", "scale": 1.02}
+    ]
+  },
+  "tasks": {
+    "atomic_yesno": 0.22,
+    "conjunction_yesno": 0.18,
+    "reference_yesno": 0.16,
+    "compare_distance_yesno": 0.16,
+    "count_relation": 0.14,
+    "chain_relation_yesno": 0.14
+  },
+  "seed": 19
+}

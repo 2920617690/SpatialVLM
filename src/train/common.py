@@ -5,15 +5,31 @@ import random
 from pathlib import Path
 from typing import Any, Dict
 
-import numpy as np
-import torch
-import yaml
+try:
+    import numpy as np
+except ModuleNotFoundError:
+    np = None
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+try:
+    import yaml
+except ModuleNotFoundError:
+    yaml = None
 
 
 def load_config(path: str | Path) -> Dict[str, Any]:
     path = Path(path).resolve()
     with path.open("r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+        if path.suffix.lower() == ".json":
+            config = json.load(handle)
+        else:
+            if yaml is None:
+                raise ModuleNotFoundError(
+                    "PyYAML is not installed. Use a JSON config file or install pyyaml."
+                )
+            config = yaml.safe_load(handle)
 
     parent = config.get("inherits")
     if not parent:
@@ -38,9 +54,11 @@ def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
 
 def set_global_seed(seed: int) -> None:
     random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if np is not None:
+        np.random.seed(seed)
+    if torch is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 def ensure_output_dir(config: Dict[str, Any], stage_name: str) -> Path:

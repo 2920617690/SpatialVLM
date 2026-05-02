@@ -1,135 +1,137 @@
-# AVV with Qwen3.5-4B
+# QCR: Query-Conditioned Re-encoding
 
-## 1. Concrete Base Model
+## 1. Goal
 
-This codebase assumes a real multimodal base model:
+This project is organized around one narrow question:
 
-```text
-image -> ViT -> projector -> decoder-only LLM
-```
+**does it help if the same image is encoded a second time after the model already knows the question?**
 
-The default implementation targets `Qwen3.5-4B`.
+The point is not to start with crop policies, RL agents, or inspect controllers. The point is to isolate the smallest plausible mechanism.
 
-The working claim is not that we need more permanent reasoning modules. The working claim is that the same VLM should learn a better control policy over answering:
+## 2. Two Models
 
-```text
-draft -> verify -> final
-```
+The repo compares:
 
-## 2. Training Objective
+1. `one-pass baseline`
+2. `QCR two-pass`
 
-We train the shared Qwen model in three supervised modes:
-
-### Draft Mode
+### Baseline
 
 ```text
-input: image + question
-target: structured draft response
+image -> ViT -> projector -> decoder -> answer
 ```
 
-The target contains:
-
-- proposed answer
-- draft claim
-- decomposed subclaims
-
-### Verify Mode
+### QCR
 
 ```text
-input: image + question + draft claim
-target: structured verification response
+pass 1:
+  image -> ViT -> projector -> decoder
+  read hidden state at <reencode_slot>
+
+pass 2:
+  project that hidden state into a condition token
+  prepend it to the same image token sequence
+  run a second image encoding pass
+  residual-refine first-pass visual tokens
+  decode final answer
 ```
 
-The target contains:
+## 3. Forward Pass
 
-- per-subclaim verdicts
-- overall verdict in `{support, contradict, insufficient}`
+Let:
 
-### Final Mode
+- `P` be image patch tokens
+- `G1` be first-pass visual tokens
+- `h_q` be the decoder hidden state at `<reencode_slot>`
+- `c` be the condition token
+- `G2` be second-pass visual tokens
+- `R` be refined visual tokens
+
+### Pass 1
 
 ```text
-input: image + question + draft response + verification response
-target: final answer
+P = PatchEmbed(x)
+G1 = ViT(P)
+h_q = Decoder(Project(G1), q + <reencode_slot>)
 ```
 
-## 3. Policy Learning
-
-After warm start, we treat the same shared model as a policy over high-level actions:
+### Condition Token
 
 ```text
-PROPOSE
-VERIFY
-REVISE
-ANSWER
-ABSTAIN
+c = W_c(h_q)
 ```
 
-The main learning target is not "how to do vision from scratch." It is:
-
-- when to verify
-- when to revise
-- when to stop
-
-## 4. BVPO
-
-The repo includes a lightweight stage-2 trainer called `BVPO`:
-
-`Budgeted Verification Policy Optimization`
-
-Its reward has four components:
+### Pass 2
 
 ```text
-R =
-  answer_reward
-  + verify_reward
-  - step_cost
-  - contradiction_penalty
+G2_full = ViT([c ; P])
+G2 = G2_full[:, 1:, :]
 ```
 
-The purpose of the algorithm is to make verification useful but not free. If the model keeps verifying without need, return should go down.
-
-## 5. Why Synthetic Data Comes First
-
-Before using noisy real-world QA, the repo uses synthetic spatial scenes because they provide:
-
-- exact object identities
-- exact bounding boxes
-- exact subclaims
-- exact verification labels
-- exact imitation trajectories
-
-This is especially important for training `verify mode` and stage-1 imitation.
-
-## 6. Sample Structure
-
-Each training sample stores:
+### Residual Fusion
 
 ```text
-image_path
-question
-answer
-draft_response
-verify_response
-final_response
-subclaims
-trajectory
-scene_objects
+alpha = sigmoid(W_a(h_q))
+R = G1 + alpha * (G2 - G1)
 ```
 
-This structure supports:
+The final decoder sees `Project(R)` instead of `Project(G1)`.
 
-- stage-0 SFT
-- stage-1 imitation
-- stage-2 RL rollouts
+## 4. Training
 
-## 7. Recommended Experimental Order
+The synthetic dataset provides:
 
-The intended experimental order is:
+- `question`
+- `draft_response`
+- `final_response`
 
-1. one-shot baseline on synthetic tasks
-2. stage-0 SFT on `draft / verify / final`
-3. stage-1 imitation on oracle trajectories
-4. stage-2 BVPO fine-tuning
-5. later transfer to real data
+The baseline trainer uses `final_response` only.
 
-That order matters. If stage-0 and stage-1 do not help, RL should not be trusted to rescue the idea.
+The QCR trainer uses:
+
+- optional pass-1 draft loss
+- pass-2 final answer loss
+
+```text
+L = lambda_draft * L_draft + lambda_final * L_final
+```
+
+## 5. Why This Version First
+
+QCR v0 deliberately avoids:
+
+- crop policies
+- box regression
+- recurrent inspect loops
+- RL control
+
+Those may matter later, but they should not come before we know whether question-conditioned second-pass encoding helps at all.
+
+## 6. Strict vs Fallback Backend
+
+The intended method is:
+
+```text
+[condition token ; image patch tokens] -> same ViT blocks
+```
+
+However, different Qwen checkpoints expose different internals. The code therefore supports two backends:
+
+1. `strict_shared_vit`
+2. `projected_token_refiner` fallback
+
+The fallback preserves the two-pass logic but applies the condition token in projected visual token space if direct vision-tower re-entry is unavailable.
+
+## 7. First Ablations
+
+The minimum comparison should be:
+
+1. one-pass baseline
+2. two-pass with dummy condition token
+3. two-pass with question-conditioned token
+
+That tells you whether:
+
+- two-pass helps at all
+- the gain is just extra depth or compute
+- or the question-conditioned token really changes the visual encoding

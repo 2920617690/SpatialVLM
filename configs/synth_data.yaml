@@ -1,5 +1,5 @@
 output:
-  root: "./data/synthetic/qwen35_avv"
+  root: "./data/synthetic/qwen35_qcr"
 
 render:
   image_size: 448
@@ -10,6 +10,11 @@ splits:
   val: 1000
   test: 1000
 
+questions_per_image:
+  train: 4
+  val: 4
+  test: 4
+
 scene:
   min_objects: 3
   max_objects: 6
@@ -18,11 +23,11 @@ scene:
   max_overlap_ratio: 0.08
 
 tasks:
-  atomic_yesno: 0.30
+  atomic_yesno: 0.24
   conjunction_yesno: 0.18
   reference_yesno: 0.16
   compare_distance_yesno: 0.16
-  count_relation: 0.10
-  chain_relation_yesno: 0.10
+  count_relation: 0.12
+  chain_relation_yesno: 0.14
 
 seed: 42

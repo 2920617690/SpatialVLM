@@ -1,22 +1,15 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 from PIL import Image
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
-from .prompts import (
-    build_policy_prompt,
-    mode_to_system_prompt,
-    mode_to_target,
-    mode_to_user_prompt,
-    trajectory_target,
-)
+from .prompts import mode_to_system_prompt, mode_to_target, mode_to_user_prompt
 from .schema import AVVSample, load_avv_samples
 from src.model.chat import build_messages, render_chat_text
 
@@ -58,41 +51,23 @@ class AVVSupervisedDataset(Dataset):
         return self.records[idx]
 
 
-class AVVPolicyDataset(Dataset):
+class AVVQCRDataset(Dataset):
     def __init__(
         self,
         manifest_paths: Sequence[str | Path],
         max_samples: int | None = None,
     ) -> None:
-        self.records: List[TrainingRecord] = []
+        self.samples: List[AVVSample] = []
         for manifest in manifest_paths:
-            for sample in load_avv_samples(manifest):
-                history: List[Dict[str, str]] = []
-                for step in sample.trajectory:
-                    prompt_text = build_policy_prompt(sample, history)
-                    target_text = trajectory_target(step)
-                    self.records.append(
-                        TrainingRecord(
-                            sample=sample,
-                            mode="policy",
-                            prompt_text=prompt_text,
-                            target_text=target_text,
-                        )
-                    )
-                    history.append(
-                        {
-                            "action": json.loads(step.target_output)["action"],
-                            "observation": step.comment or "none",
-                        }
-                    )
+            self.samples.extend(load_avv_samples(manifest))
         if max_samples is not None:
-            self.records = self.records[:max_samples]
+            self.samples = self.samples[:max_samples]
 
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self.samples)
 
-    def __getitem__(self, idx: int) -> TrainingRecord:
-        return self.records[idx]
+    def __getitem__(self, idx: int) -> AVVSample:
+        return self.samples[idx]
 
 
 class QwenChatCollator:

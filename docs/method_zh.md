@@ -1,135 +1,143 @@
-# 基于 Qwen3.5-4B 的 AVV
+# QCR：问题条件下的二次视觉编码
 
-## 1. 具体底座
+## 1. 目标
 
-这套代码不再讨论抽象 VLM，而是直接假设一个真实的多模态底座：
+这个项目现在只围绕一个更小的问题展开：
 
-```text
-image -> ViT -> projector -> decoder-only LLM
-```
+**如果模型在知道问题之后，再对同一张图做一次编码，空间推理会不会更强？**
 
-默认目标模型是 `Qwen3.5-4B`。
+所以这版方法刻意不先引入：
 
-这里的核心判断不是“要再加很多推理模块”，而是：
+- crop 策略
+- box 回归
+- inspect controller
+- RL 动作学习
 
-```text
-同一个 VLM 应该学会 draft -> verify -> final 这个控制流
-```
+我们先验证最小机制本身。
 
-## 2. 三种监督模式
+## 2. 两个模型
 
-共享的 Qwen 模型会被训练成三种模式：
+仓库现在只比较两个核心模型：
 
-### Draft Mode
+1. `one-pass baseline`
+2. `QCR two-pass`
 
-```text
-输入: 图像 + 问题
-输出: 结构化草案
-```
-
-草案里包含：
-
-- 预测答案
-- draft claim
-- 分解后的 subclaims
-
-### Verify Mode
+### Baseline
 
 ```text
-输入: 图像 + 问题 + draft claim
-输出: 结构化验证结果
+image -> ViT -> projector -> decoder -> answer
 ```
 
-验证结果里包含：
-
-- 每个 subclaim 的 verdict
-- 总体 verdict: `support / contradict / insufficient`
-
-### Final Mode
+### QCR
 
 ```text
-输入: 图像 + 问题 + draft response + verification response
-输出: 最终答案
+第一遍:
+  image -> ViT -> projector -> decoder
+  读取 <reencode_slot> 的 hidden state
+
+第二遍:
+  把这个 hidden state 投影成一个 condition token
+  prepend 到同一张图的 token 序列前面
+  再做一次图像编码
+  用残差方式修正第一次视觉表示
+  decoder 输出最终答案
 ```
 
-## 3. 策略学习
+## 3. 前向过程
 
-在热启动之后，同一个共享模型还会被当作一个高层动作策略：
+记：
+
+- `P` 为图像 patch token
+- `G1` 为第一次视觉 token
+- `h_q` 为 `<reencode_slot>` 的 hidden state
+- `c` 为 condition token
+- `G2` 为第二次视觉 token
+- `R` 为最终 refined visual token
+
+### 第一遍
 
 ```text
-PROPOSE
-VERIFY
-REVISE
-ANSWER
-ABSTAIN
+P = PatchEmbed(x)
+G1 = ViT(P)
+h_q = Decoder(Project(G1), q + <reencode_slot>)
 ```
 
-这个策略真正要学的不是“视觉能力本身”，而是：
-
-- 什么时候该验证
-- 什么时候该改写
-- 什么时候该停止
-
-## 4. BVPO
-
-仓库里实现的 stage-2 算法叫：
-
-`BVPO = Budgeted Verification Policy Optimization`
-
-奖励由四部分组成：
+### condition token
 
 ```text
-R =
-  answer_reward
-  + verify_reward
-  - step_cost
-  - contradiction_penalty
+c = W_c(h_q)
 ```
 
-核心思想是：验证应该有价值，但不能无限做。多看一步是有成本的。
-
-## 5. 为什么先做合成数据
-
-在一开始不应该直接上 noisy 的真实 QA，而应该先用合成空间场景，因为它能给出：
-
-- 精确对象身份
-- 精确 bbox
-- 精确 subclaims
-- 精确 verification label
-- 精确 imitation trajectory
-
-这对 `verify mode` 和 stage-1 imitation 尤其关键。
-
-## 6. 样本结构
-
-每个训练样本都会保存：
+### 第二遍
 
 ```text
-image_path
-question
-answer
-draft_response
-verify_response
-final_response
-subclaims
-trajectory
-scene_objects
+G2_full = ViT([c ; P])
+G2 = G2_full[:, 1:, :]
 ```
 
-这套结构可以同时服务：
+### 残差融合
 
-- stage-0 SFT
-- stage-1 imitation
-- stage-2 RL rollout
+```text
+alpha = sigmoid(W_a(h_q))
+R = G1 + alpha * (G2 - G1)
+```
 
-## 7. 建议的实验顺序
+最后 decoder 看到的是 `Project(R)`，不是 `Project(G1)`。
 
-推荐先按这个顺序做：
+## 4. 训练
 
-1. synthetic 数据上的 one-shot baseline
-2. `draft / verify / final` 的 stage-0 SFT
-3. oracle trajectory 的 stage-1 imitation
-4. stage-2 BVPO 微调
-5. 再迁移到真实数据
+当前合成数据提供：
 
-这个顺序很重要。如果 stage-0 和 stage-1 都没有帮助，就不应该指望 RL 单独把问题救回来。
+- `question`
+- `draft_response`
+- `final_response`
+
+baseline 只用 `final_response`。
+
+QCR 使用：
+
+- 可选的第一遍 draft loss
+- 第二遍 final answer loss
+
+```text
+L = lambda_draft * L_draft + lambda_final * L_final
+```
+
+## 5. 为什么先做这版
+
+QCR v0 的目标不是直接做一个复杂系统，而是先回答：
+
+**question-conditioned second-pass encoding 到底有没有用？**
+
+如果这一步没收益，那后面再加 crop、再加 inspect、再加 RL 都没有意义。
+
+## 6. 严格后端与回退后端
+
+理想实现是：
+
+```text
+[condition token ; image patch tokens] -> same ViT blocks
+```
+
+但不同 Qwen checkpoint 暴露的视觉塔内部结构可能不同。
+
+所以代码保留两种 backend：
+
+1. `strict_shared_vit`
+2. `projected_token_refiner` fallback
+
+fallback 仍然保留两遍编码逻辑，只是当拿不到视觉塔 block 接口时，在 projected visual token 空间里做近似重编码。
+
+## 7. 最先要做的对照
+
+最小实验表应该是：
+
+1. one-pass baseline
+2. two-pass + dummy condition token
+3. two-pass + question-conditioned token
+
+这样才能区分：
+
+- 两遍编码本身有没有帮助
+- 提升是不是只是多算一遍
+- 还是 question-conditioned token 真正改变了视觉编码

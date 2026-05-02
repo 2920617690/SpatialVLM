@@ -10,13 +10,13 @@ if str(ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run stage-1 oracle-guided imitation.")
+    parser = argparse.ArgumentParser(description="Train the one-pass Qwen baseline.")
     parser.add_argument("--config", type=Path, required=True)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    from src.train.train_imitation import run_imitation_stage
+    from src.train.train_baseline import run_baseline_stage
 
-    run_imitation_stage(args.config)
+    run_baseline_stage(args.config)

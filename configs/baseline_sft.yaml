@@ -1,13 +1,12 @@
 inherits: "configs/base.yaml"
 
-stage: "stage1_imitation"
+stage: "baseline_sft"
 
 dataset:
-  modes:
-    - "policy"
+  mode: "baseline"
 
 training:
   num_train_epochs: 1
-  learning_rate: 1.0e-5
+  learning_rate: 2.0e-5
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 16

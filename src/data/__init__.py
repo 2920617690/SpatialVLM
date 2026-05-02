@@ -2,14 +2,14 @@ from .schema import AVVSample, RelationSample, SceneObject, SubClaim, Trajectory
 from .synthetic_generator import generate_synthetic_dataset
 
 try:
-    from .multimodal_dataset import AVVPolicyDataset, AVVSupervisedDataset, QwenChatCollator
+    from .multimodal_dataset import AVVQCRDataset, AVVSupervisedDataset, QwenChatCollator
 except ModuleNotFoundError:
-    AVVPolicyDataset = None
+    AVVQCRDataset = None
     AVVSupervisedDataset = None
     QwenChatCollator = None
 
 __all__ = [
-    "AVVPolicyDataset",
+    "AVVQCRDataset",
     "AVVSample",
     "AVVSupervisedDataset",
     "QwenChatCollator",

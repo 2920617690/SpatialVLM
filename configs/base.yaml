@@ -1,7 +1,7 @@
 project:
-  name: "qwen35_avv"
+  name: "qwen35_qcr"
   seed: 42
-  output_root: "./outputs/qwen35_avv"
+  output_root: "./outputs/qwen35_qcr"
 
 model:
   base_model_id: "Qwen/Qwen3.5-4B"
@@ -10,14 +10,14 @@ model:
   attn_implementation: "sdpa"
   gradient_checkpointing: true
   use_flash_attention_2: false
-  freeze_vision_tower: false
   max_image_resolution: 448
   max_prompt_length: 4096
-  max_generation_tokens:
-    draft: 256
-    verify: 256
-    final: 256
-    policy: 128
+  max_generation_tokens: 256
+  llm_hidden_size: 2560
+  reencode_backend: "strict_shared_vit"
+  condition_token_type: "register"
+  residual_gate: "channel"
+  reencode_slot_token: "<reencode_slot>"
 
 lora:
   enabled: true
@@ -35,11 +35,11 @@ lora:
     - "down_proj"
 
 data:
-  root: "./data/synthetic/qwen35_avv"
-  train_manifest: "./data/synthetic/qwen35_avv/manifests/train.jsonl"
-  val_manifest: "./data/synthetic/qwen35_avv/manifests/val.jsonl"
-  test_manifest: "./data/synthetic/qwen35_avv/manifests/test.jsonl"
-  image_root: "./data/synthetic/qwen35_avv/images"
+  root: "./data/synthetic/qwen35_qcr"
+  train_manifest: "./data/synthetic/qwen35_qcr/manifests/train.jsonl"
+  val_manifest: "./data/synthetic/qwen35_qcr/manifests/val.jsonl"
+  test_manifest: "./data/synthetic/qwen35_qcr/manifests/test.jsonl"
+  image_root: "./data/synthetic/qwen35_qcr/images"
   max_train_samples: null
   max_eval_samples: null
   num_workers: 2
@@ -61,17 +61,7 @@ training:
   report_to: []
   remove_unused_columns: false
 
-policy:
-  max_episode_steps: 4
-  discount: 0.99
-  verify_reward: 0.2
-  answer_reward: 1.0
-  step_cost: 0.05
-  contradiction_penalty: 0.3
-  abstain_reward: 0.1
-  normalize_returns: true
-  rollout_temperature: 0.8
-  rollout_top_p: 0.95
-  learning_rate: 1.0e-6
-  episodes_per_epoch: 64
-  gradient_clip_norm: 1.0
+loss:
+  lambda_draft: 0.3
+  lambda_final: 1.0
+  use_draft_loss: true

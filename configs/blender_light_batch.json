@@ -1,0 +1,64 @@
+{
+  "blender_binary": "/Applications/Blender.app/Contents/MacOS/Blender",
+  "asset_root": "/Users/fwk/Downloads/vlm-bench/ordinary-bench-core/blender-assets-demo/models",
+  "output": {
+    "root": "./data/synthetic/qwen35_qcr_blender_batch_v2"
+  },
+  "allowed_asset_keys": ["chair", "human_1", "human_2"],
+  "render": {
+    "engine": "BLENDER_EEVEE_NEXT",
+    "resolution_x": 640,
+    "resolution_y": 480,
+    "samples": 16,
+    "transparent_background": false
+  },
+  "splits": {
+    "train": 6,
+    "val": 2,
+    "test": 2
+  },
+  "questions_per_image": {
+    "train": 4,
+    "val": 4,
+    "test": 4
+  },
+  "scene": {
+    "min_objects": 3,
+    "max_objects": 5,
+    "placement_radius_min": 1.0,
+    "placement_radius_max": 3.2,
+    "min_pair_distance": 1.2,
+    "camera_distance_range": [7.5, 10.5],
+    "camera_azimuth_range": [20.0, 70.0],
+    "camera_elevation_range": [18.0, 35.0]
+  },
+  "style": {
+    "ground_palette": [
+      [0.42, 0.42, 0.44, 1.0],
+      [0.54, 0.50, 0.44, 1.0],
+      [0.35, 0.40, 0.36, 1.0]
+    ],
+    "background_palette": [
+      [0.72, 0.80, 1.0, 1.0],
+      [0.92, 0.86, 0.78, 1.0],
+      [0.82, 0.82, 0.82, 1.0]
+    ],
+    "object_palette": [
+      {"name": "red", "rgba": [0.85, 0.22, 0.18, 1.0]},
+      {"name": "blue", "rgba": [0.20, 0.45, 0.85, 1.0]},
+      {"name": "green", "rgba": [0.25, 0.65, 0.32, 1.0]},
+      {"name": "yellow", "rgba": [0.93, 0.78, 0.18, 1.0]},
+      {"name": "purple", "rgba": [0.55, 0.32, 0.72, 1.0]},
+      {"name": "orange", "rgba": [0.90, 0.48, 0.12, 1.0]}
+    ]
+  },
+  "tasks": {
+    "atomic_yesno": 0.22,
+    "conjunction_yesno": 0.18,
+    "reference_yesno": 0.18,
+    "compare_distance_yesno": 0.18,
+    "count_relation": 0.12,
+    "chain_relation_yesno": 0.12
+  },
+  "seed": 7
+}

@@ -1,0 +1,201 @@
+{
+  "blender_binary": "/Applications/Blender.app/Contents/MacOS/Blender",
+  "output": {
+    "root": "./data/synthetic/qwen35_qcr_blender_clevr_probe"
+  },
+  "render": {
+    "engine": "CYCLES",
+    "resolution_x": 960,
+    "resolution_y": 640,
+    "samples": 24,
+    "transparent_background": false
+  },
+  "splits": {
+    "train": 1,
+    "val": 0,
+    "test": 0
+  },
+  "questions_per_image": {
+    "train": 1,
+    "val": 0,
+    "test": 0
+  },
+  "scene": {
+    "min_objects": 4,
+    "max_objects": 7,
+    "placement_radius_min": 1.1,
+    "placement_radius_max": 3.4,
+    "min_pair_distance": 1.0,
+    "camera_distance_range": [
+      7.8,
+      10.8
+    ],
+    "camera_azimuth_range": [
+      18.0,
+      70.0
+    ],
+    "camera_elevation_range": [
+      18.0,
+      34.0
+    ]
+  },
+  "style": {
+    "ground_palette": [
+      [
+        0.66,
+        0.66,
+        0.66,
+        1.0
+      ],
+      [
+        0.56,
+        0.54,
+        0.51,
+        1.0
+      ],
+      [
+        0.45,
+        0.45,
+        0.47,
+        1.0
+      ]
+    ],
+    "background_palette": [
+      [
+        0.72,
+        0.78,
+        0.92,
+        1.0
+      ],
+      [
+        0.86,
+        0.84,
+        0.8,
+        1.0
+      ],
+      [
+        0.78,
+        0.8,
+        0.83,
+        1.0
+      ]
+    ],
+    "object_palette": [
+      {
+        "name": "red",
+        "rgba": [
+          0.82,
+          0.16,
+          0.16,
+          1.0
+        ]
+      },
+      {
+        "name": "blue",
+        "rgba": [
+          0.18,
+          0.4,
+          0.84,
+          1.0
+        ]
+      },
+      {
+        "name": "green",
+        "rgba": [
+          0.21,
+          0.6,
+          0.28,
+          1.0
+        ]
+      },
+      {
+        "name": "yellow",
+        "rgba": [
+          0.9,
+          0.78,
+          0.16,
+          1.0
+        ]
+      },
+      {
+        "name": "purple",
+        "rgba": [
+          0.53,
+          0.28,
+          0.73,
+          1.0
+        ]
+      },
+      {
+        "name": "cyan",
+        "rgba": [
+          0.12,
+          0.73,
+          0.78,
+          1.0
+        ]
+      },
+      {
+        "name": "brown",
+        "rgba": [
+          0.56,
+          0.36,
+          0.16,
+          1.0
+        ]
+      },
+      {
+        "name": "gray",
+        "rgba": [
+          0.42,
+          0.42,
+          0.42,
+          1.0
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "rubber",
+        "metallic": 0.0,
+        "roughness": 0.72
+      },
+      {
+        "name": "metal",
+        "metallic": 1.0,
+        "roughness": 0.2
+      }
+    ]
+  },
+  "objects": {
+    "shapes": [
+      "cube",
+      "sphere",
+      "cylinder",
+      "cone"
+    ],
+    "sizes": [
+      {
+        "name": "small",
+        "scale": 0.52
+      },
+      {
+        "name": "medium",
+        "scale": 0.76
+      },
+      {
+        "name": "large",
+        "scale": 1.02
+      }
+    ]
+  },
+  "tasks": {
+    "atomic_yesno": 0.24,
+    "conjunction_yesno": 0.18,
+    "reference_yesno": 0.16,
+    "compare_distance_yesno": 0.16,
+    "count_relation": 0.12,
+    "chain_relation_yesno": 0.14
+  },
+  "seed": 11
+}

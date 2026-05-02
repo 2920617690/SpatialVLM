@@ -4,24 +4,26 @@ from pathlib import Path
 
 from transformers import Trainer, TrainingArguments
 
-from src.data import AVVPolicyDataset, QwenChatCollator
+from src.data import AVVSupervisedDataset, QwenChatCollator
 from src.model import load_qwen_components
 
 from .common import ensure_output_dir, load_config, set_global_seed
 
 
-def run_imitation_stage(config_path: str | Path) -> None:
+def run_baseline_stage(config_path: str | Path) -> None:
     config = load_config(config_path)
     set_global_seed(config["project"]["seed"])
     output_dir = ensure_output_dir(config, config["stage"])
     components = load_qwen_components(config)
 
-    train_dataset = AVVPolicyDataset(
+    train_dataset = AVVSupervisedDataset(
         manifest_paths=[config["data"]["train_manifest"]],
+        modes=[config["dataset"]["mode"]],
         max_samples=config["data"].get("max_train_samples"),
     )
-    eval_dataset = AVVPolicyDataset(
+    eval_dataset = AVVSupervisedDataset(
         manifest_paths=[config["data"]["val_manifest"]],
+        modes=[config["dataset"]["mode"]],
         max_samples=config["data"].get("max_eval_samples"),
     )
     collator = QwenChatCollator(

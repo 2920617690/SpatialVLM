@@ -1,0 +1,35 @@
+{
+  "output": {
+    "root": "./data/synthetic/qwen35_qcr_batch"
+  },
+  "render": {
+    "image_size": 448,
+    "background": [248, 248, 245]
+  },
+  "splits": {
+    "train": 48,
+    "val": 12,
+    "test": 12
+  },
+  "questions_per_image": {
+    "train": 4,
+    "val": 4,
+    "test": 4
+  },
+  "scene": {
+    "min_objects": 3,
+    "max_objects": 6,
+    "min_object_size": 56,
+    "max_object_size": 108,
+    "max_overlap_ratio": 0.08
+  },
+  "tasks": {
+    "atomic_yesno": 0.24,
+    "conjunction_yesno": 0.18,
+    "reference_yesno": 0.16,
+    "compare_distance_yesno": 0.16,
+    "count_relation": 0.12,
+    "chain_relation_yesno": 0.14
+  },
+  "seed": 42
+}

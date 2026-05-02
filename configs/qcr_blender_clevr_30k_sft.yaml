@@ -1,0 +1,8 @@
+inherits: "configs/qcr_sft.yaml"
+
+data:
+  root: "./data/synthetic/qwen35_qcr_blender_clevr_30k"
+  train_manifest: "./data/synthetic/qwen35_qcr_blender_clevr_30k/manifests/train.jsonl"
+  val_manifest: "./data/synthetic/qwen35_qcr_blender_clevr_30k/manifests/val.jsonl"
+  test_manifest: "./data/synthetic/qwen35_qcr_blender_clevr_30k/manifests/test.jsonl"
+  image_root: "./data/synthetic/qwen35_qcr_blender_clevr_30k/images"

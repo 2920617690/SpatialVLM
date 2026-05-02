@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Synthesize AVV training data.")
+    parser = argparse.ArgumentParser(description="Synthesize QCR training data.")
     parser.add_argument("--config", type=Path, required=True)
     return parser.parse_args()
 

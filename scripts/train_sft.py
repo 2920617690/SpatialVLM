@@ -10,7 +10,7 @@ if str(ROOT) not in sys.path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run stage-0 supervised warm start.")
+    parser = argparse.ArgumentParser(description="Train the QCR two-pass model.")
     parser.add_argument("--config", type=Path, required=True)
     return parser.parse_args()
 
